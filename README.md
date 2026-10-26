@@ -17,6 +17,12 @@ Many mistakes in forecasting and in evaluating models or prompts may come less f
 
 It is small (standard library only), runs locally and makes no network calls.
 
+## Why now?
+
+Two things may have changed with LLMs. Trying one more analysis became almost free, so the number of paths taken through a dataset can grow without anyone noticing. And more people can now run an analysis, or evaluate a prompt or a model, without the habits statisticians built for exactly this situation: write the plan first, count what you tried, keep some data unseen.
+
+`forecastseal` does not make an LLM smarter. It aims to make the process visible and harder to bend by accident. That applies whether the analyst is a person, an AI agent, or both, and also when what you are analysing is an LLM-based system itself (prompts, models, judges), which is data analysis too.
+
 ## What this gets you
 
 | Without it, this can happen | With it |

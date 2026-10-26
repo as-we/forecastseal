@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 340" width="760" height="340" role="img" aria-label="Two timelines. Without a sealed plan, the approach is tweaked after every look and no version reaches the planned number of items. With a sealed plan, one approach runs to the planned size; an early look is only a hint and the verdict comes at the planned size.">
+  <rect width="760" height="340" fill="#f6f7f9"/>
+  <g font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#14181f">
+    <!-- region where no verdict is possible -->
+    <rect x="60" y="62" width="640" height="236" fill="#d1495b" opacity="0.07"/>
+    <line x1="700" y1="52" x2="700" y2="304" stroke="#0a6f6a" stroke-width="2" stroke-dasharray="6 5"/>
+    <text x="700" y="44" text-anchor="middle" font-weight="700" fill="#0a6f6a">planned size</text>
+
+    <!-- panel 1: without a sealed plan -->
+    <text x="60" y="26" font-weight="700" font-size="15">Without a sealed plan: look, tweak, look, tweak</text>
+    <line x1="60" y1="112" x2="700" y2="112" stroke="#586272"/>
+    <rect x="60" y="92" width="90" height="26" rx="3" fill="#9bc7d1"/><text x="105" y="109" text-anchor="middle" font-size="12">v1</text>
+    <rect x="150" y="92" width="85" height="26" rx="3" fill="#7fb4c1"/><text x="192" y="109" text-anchor="middle" font-size="12">v2</text>
+    <rect x="235" y="92" width="100" height="26" rx="3" fill="#9bc7d1"/><text x="285" y="109" text-anchor="middle" font-size="12">v3</text>
+    <rect x="335" y="92" width="85" height="26" rx="3" fill="#7fb4c1"/><text x="377" y="109" text-anchor="middle" font-size="12">v4</text>
+    <g stroke="#d1495b" stroke-width="3" fill="none" stroke-linecap="round">
+      <path d="M144 78 l12 12 M156 78 l-12 12"/><path d="M229 78 l12 12 M241 78 l-12 12"/><path d="M329 78 l12 12 M341 78 l-12 12"/><path d="M414 78 l12 12 M426 78 l-12 12"/>
+    </g>
+    <text x="150" y="70" text-anchor="middle" font-size="11" fill="#586272">"maybe this?"</text>
+    <text x="235" y="70" text-anchor="middle" font-size="11" fill="#586272">"or this?"</text>
+    <text x="335" y="70" text-anchor="middle" font-size="11" fill="#586272">"or this?"</text>
+    <rect x="450" y="88" width="160" height="34" rx="4" fill="none" stroke="#586272" stroke-dasharray="4 3"/>
+    <text x="530" y="109" text-anchor="middle" font-size="12">report the best-looking</text>
+    <text x="640" y="109" font-size="20" font-weight="700" fill="#d1495b">?</text>
+    <text x="60" y="140" font-size="12" fill="#586272">Each tweak starts again with too few items. No version reaches the planned size, so none can support a verdict.</text>
+
+    <!-- panel 2: with a sealed plan -->
+    <text x="60" y="186" font-weight="700" font-size="15">With a sealed plan: one approach, run to the planned size</text>
+    <line x1="60" y1="252" x2="700" y2="252" stroke="#586272"/>
+    <rect x="60" y="232" width="640" height="26" rx="3" fill="#7fb4c1"/><text x="380" y="249" text-anchor="middle" font-size="12">v1, unchanged</text>
+    <path d="M284 214 l12 12 M296 214 l-12 12" stroke="#d1495b" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <text x="290" y="206" text-anchor="middle" font-size="11" fill="#586272">look: a hint, logged, no verdict</text>
+    <circle cx="700" cy="245" r="9" fill="#0a6f6a"/>
+    <text x="692" y="224" text-anchor="end" font-size="12" font-weight="700" fill="#0a6f6a">verdict</text>
+    <text x="60" y="282" font-size="12" fill="#586272">If you must change something, start a new study and say so.</text>
+
+    <!-- legend -->
+    <g transform="translate(60 322)">
+      <path d="M0 -8 l10 10 M10 -8 l-10 10" stroke="#d1495b" stroke-width="3" fill="none" stroke-linecap="round"/><text x="18" y="2" font-size="12">look before the planned size (not a verdict)</text>
+      <circle cx="320" cy="-3" r="7" fill="#0a6f6a"/><text x="334" y="2" font-size="12">final analysis at the planned size</text>
+    </g>
+  </g>
+</svg>

@@ -2,7 +2,7 @@
 
 Seal your evaluation plan before the results exist, keep forecasts and scores in a tamper-evident ledger, then test the comparison honestly.
 
-> **Status: pre-alpha (v0.0.9), not on PyPI yet.** The command line, the ledger format and the report may still change.
+> **Status: pre-alpha (v0.0.10), not on PyPI yet.** The command line, the ledger format and the report may still change.
 
 ## See it in 30 seconds
 
@@ -51,9 +51,21 @@ Two things may have changed with LLMs. Trying one more analysis became almost fr
 | Too few items to ever see the difference you care about | `fseal power` says so before you collect the data. |
 | An LLM judge is trusted without checking it against people | `fseal agreement` gives kappa and AC1 with an interval. |
 
+![Two timelines: without a sealed plan the approach is tweaked after every look and no version reaches the planned size; with a sealed plan one approach runs to the planned size, an early look is only a hint, and the verdict comes at the planned size.](docs/images/timeline-wrong-vs-right.svg)
+
+Why the order matters: every look-and-tweak before the planned size leaves a version of the approach that has too few items to support a verdict. In a ledger, looks before the planned size are marked **×** and count as hints; a verdict (**●**) can only come at the planned size.
+
 It cannot make a bad evaluation good. It makes the process hard to bend unnoticed, including by yourself.
 
 **Typical uses:** choosing between two prompts or models on a fixed test set; showing a cheaper model is not worse by more than an agreed margin; tracking personal or team forecasts with honest calibration; checking an LLM judge against human labels.
+
+## A sample report
+
+`fseal report` writes one self-contained HTML file: the sealed plan, scores, comparisons with their roles (primary or exploratory), a timeline of every look, and the log. This one is built from synthetic data by `python examples/sample_report.py` ([open the file](docs/sample-report.html) in a browser):
+
+![Top of the sample report: ledger status, progress, sealed protocol, summary table.](docs/images/report-sample.png)
+
+![The timeline of looks in the sample report: three early looks marked x, one final analysis at the planned size.](docs/images/report-timeline.png)
 
 ## Install
 

@@ -75,3 +75,21 @@ def test_cli_writes_the_file(tmp_path, capsys):
     main(["--dir", str(tmp_path / ".fseal"), "report", "-o", str(out), "--compare", "A", "B"])
     assert out.exists() and "forecastseal report" in out.read_text(encoding="utf-8")
     assert "self-contained" in capsys.readouterr().out
+
+
+def test_timeline_marks_interim_looks_and_the_final_analysis(tmp_path):
+    led, h = make(tmp_path, n=10)                                    # 10 of 20 planned
+    report.build(led, h, compare=[("A", "B")], interim=True)         # an interim look at 10 items
+    page = report.build(led, h, now="2026-01-01T00:00:00+00:00")
+    assert "Timeline of looks" in page and "planned size: 20" in page and "stroke-width=\"2.5\"" in page    # an x mark
+    assert "1 look(s) before the planned size" in page
+
+
+def test_timeline_shows_a_final_circle_and_the_stop_marker(tmp_path):
+    led, h = make(tmp_path, n=20)
+    report.build(led, h, compare=[("A", "B")])                       # final look at 20 of 20
+    page = report.build(led, h)
+    assert "<circle" in page and "Timeline of looks" in page
+    led2, h2 = make(tmp_path / "b", n=8)
+    led2.close(h2, "ran out of time")
+    assert "stopped here" in report.build(led2, h2)

@@ -18,7 +18,7 @@ main{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:30px}
 h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:0 0 8px}p{margin:0 0 8px}
 .muted{color:var(--muted)}.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;word-break:break-all}
 section{display:flex;flex-direction:column;gap:12px;min-width:0}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 14px;min-width:0}
 .card b{display:block;font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
 .card span{font-size:20px;font-weight:600}
@@ -102,6 +102,39 @@ def _interval_chart(res: dict) -> str:
             f'<circle cx="{x(m):.1f}" cy="23" r="5" fill="var(--accent)"/>'
             f'<text x="20" y="62" font-size="11">← favours {esc(_short(left, 14))}</text>'
             f'<text x="{w - 20}" y="62" font-size="11" text-anchor="end">favours {esc(_short(right, 14))} →</text></svg>')
+
+
+def _timeline_chart(n_target: int, looks: list[tuple[int, str]], closure_n: int | None) -> str:
+    """Every look at the results, placed by how many items were complete at that moment.
+
+    x marks a look before the planned size (a hint, not a verdict); a circle is a final analysis at the planned size.
+    """
+    w, h, left, right = 560, 150, 24, 70
+    span = max(n_target, max((n for n, _ in looks), default=0), closure_n or 0) or 1
+    x = lambda n: left + (n / span) * (w - left - right)
+    ybase = 78
+    out = [f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="Timeline of looks at the results against the planned number of items">']
+    out.append(f'<rect x="{x(0):.1f}" y="40" width="{x(n_target) - x(0):.1f}" height="76" fill="var(--bad)" opacity="0.10"/>')
+    out.append(f'<line x1="{x(0):.1f}" y1="{ybase}" x2="{x(span):.1f}" y2="{ybase}" stroke="currentColor" opacity="0.5"/>')
+    out.append(f'<line x1="{x(n_target):.1f}" y1="34" x2="{x(n_target):.1f}" y2="122" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 4"/>')
+    out.append(f'<text x="{x(n_target):.1f}" y="28" font-size="11" text-anchor="middle">planned size: {n_target}</text>')
+    out.append(f'<text x="{x(0):.1f}" y="136" font-size="11" opacity="0.8">no verdict is possible before the planned size</text>')
+    if closure_n is not None:
+        out.append(f'<line x1="{x(closure_n):.1f}" y1="44" x2="{x(closure_n):.1f}" y2="112" stroke="var(--warn)" stroke-width="3"/>')
+        out.append(f'<text x="{x(closure_n):.1f}" y="124" font-size="10" text-anchor="middle" style="fill: var(--warn)">stopped here</text>')
+    seen: set[tuple[int, str]] = set()
+    for n, kind in looks:
+        if (n, kind) in seen:                       # one mark per moment, even if several metrics were compared then
+            continue
+        seen.add((n, kind))
+        cx, cy = x(n), ybase - 16
+        if kind == "final":
+            out.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="6" fill="var(--accent)"/>')
+        else:
+            out.append(f'<path d="M{cx - 5:.1f} {cy - 5:.1f} L{cx + 5:.1f} {cy + 5:.1f} M{cx + 5:.1f} {cy - 5:.1f} L{cx - 5:.1f} {cy + 5:.1f}" stroke="var(--bad)" stroke-width="2.5" fill="none"/>')
+    out.append(f'<text x="{w - right}" y="{h - 4}" font-size="11" text-anchor="end">items complete when the look was taken →</text>')
+    out.append("</svg>")
+    return "".join(out)
 
 
 def _metric_block(led: Ledger, h: str, proto: dict, m: dict, multi: bool, compare, interim: bool, seed: int, is_measure: bool):
@@ -238,6 +271,14 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
     if not all_comps:
         parts.append('<section><h2>Paired comparisons</h2><p class="muted">None requested. Add <code>--compare A B</code> when the planned number of items is complete (or <code>--interim</code> for a logged, non-final look).</p></section>')
 
+    log = [e for e in led.entries() if e["type"] == "analysis" and e["body"]["protocol"] == protocol_hash and e["body"]["kind"] in ("interim", "final")]
+    if log or (closure and closure["body"]["kind"] != "completed"):
+        looks = [(e["body"]["n_resolved"], e["body"]["kind"]) for e in log]
+        n_interim = len({n for n, k in looks if k == "interim"})
+        cn = closure["body"]["n_complete"] if closure and closure["body"]["kind"] != "completed" else None
+        parts.append('<section><h2>Timeline of looks</h2><figure>' + _timeline_chart(proto["n_target"], looks, cn) +
+                     f'<figcaption>{n_interim} look(s) before the planned size, marked ×: hints, not verdicts. A filled circle is a final analysis at the planned size. '
+                     'Changing the approach after a look would restart the clock for the changed version.</figcaption></figure></section>')
     log = [e for e in led.entries() if e["type"] == "analysis"]
     if log:
         rowsh = "".join(f'<tr><td class="mono">{esc(e["ts"])}</td><td>{esc(e["body"]["kind"])}</td><td>{esc(e["body"]["what"])}{(" · " + esc(e["body"]["metric"])) if e["body"].get("metric") else ""}</td><td class="n">{esc(e["body"]["n_resolved"])}</td></tr>' for e in log)

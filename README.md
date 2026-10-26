@@ -1,30 +1,55 @@
 # forecastseal
 
-Seal your analysis plan before the outcome is known, append forecasts to a tamper-evident ledger, then score and test them honestly.
+Seal your evaluation plan before the results exist, keep forecasts and scores in a tamper-evident ledger, then test the comparison honestly.
 
-> **Status: pre-alpha (v0.0.7).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
-> Also working: continuous-valued measurements for comparing versions of a system on the same items. Planned: optional OpenTimestamps anchoring.
+> **Status: pre-alpha (v0.0.7), not on PyPI yet.** The command line, the ledger format and the report may still change.
 
-## Why
+## The idea
 
-Most forecasting and LLM evaluation mistakes are not maths mistakes. They are process mistakes: the metric was chosen after seeing the results, the sample was too small to detect anything, or the best of twenty variants was reported as if it were the only one tried.
+Most mistakes in forecasting and in evaluating models or prompts are not maths mistakes. They are process mistakes: the metric was picked after seeing the numbers, the sample was too small to see anything, or the best of twenty variants was reported as if it were the only one tried.
 
-`forecastseal` makes the process explicit:
+`forecastseal` makes the process explicit and checkable:
 
-1. **Seal the plan first.** Metric, target sample size and significance level are written to the ledger before any forecast.
-2. **Append, never edit.** Each entry includes the hash of the previous one. Changing, deleting or reordering an earlier entry breaks the chain and `fseal verify` reports it.
-3. **Resolve later.** Outcomes are separate entries. A prediction cannot be overwritten and an outcome cannot be changed.
-4. **Score and test.** Proper scoring rules (log loss, Brier), calibration, paired comparisons with bootstrap intervals, and a power calculation you can run before looking. Every `test` run is logged in the ledger; looking before the planned sample size is allowed only with `--interim`, is recorded, and never produces a verdict.
+1. **Seal the plan first.** Metrics (which ones count as conclusions, which are exploratory), planned sample size, significance level, optional non-inferiority margin and the list of items to evaluate are written to the ledger before any result.
+2. **Append, never edit.** Every entry contains the hash of the previous one. Changing, deleting or reordering history breaks the chain and `fseal verify` says so.
+3. **Look at the data in a way that leaves a trace.** Comparisons use paired items and bootstrap intervals. Looking before the planned sample size needs `--interim`, is recorded, and never produces a verdict. Every look is in the ledger.
+4. **Report what happened.** One self-contained HTML file with the sealed plan, scores, calibration, comparisons and the log of looks.
 
-## Quick start
+It is small (standard library only), runs locally and makes no network calls.
+
+## What this gets you
+
+| Without it | With it |
+|---|---|
+| "v2 looks better", after twenty variants were tried and the best one kept | The plan says what will be compared. Every look is logged, exploratory metrics are labelled and unadjusted, and the report warns when more final comparisons were run than planned. |
+| The metric, threshold or margin is chosen after seeing the numbers | They are sealed before the first result. Changing any of them changes the hash. |
+| The test set is quietly swapped or grown until it works | The item list is sealed by hash; `fseal verify --manifest` finds anything recorded outside it. |
+| "Not significantly different, so the cheaper model is as good" | A non-inferiority margin is sealed in advance and the output says whether it is cleared. |
+| Stopping early because the numbers look good | Looking before the planned sample size needs `--interim`, is recorded, and gives no verdict. |
+| Past forecasts are edited or dropped when they turn out badly | The chain breaks and `verify` reports it. Anchor the head hash to catch deleted tails too. |
+| Too few items to ever see the difference you care about | `fseal power` says so before you collect the data. |
+| An LLM judge is trusted without checking it against people | `fseal agreement` gives kappa and AC1 with an interval. |
+
+It cannot make a bad evaluation good. It makes the process hard to bend unnoticed, including by yourself.
+
+**Typical uses:** choosing between two prompts or models on a fixed test set; showing a cheaper model is not worse by more than an agreed margin; tracking personal or team forecasts with honest calibration; checking an LLM judge against human labels.
+
+## Install
 
 ```bash
-pip install -e .            # from a clone; not on PyPI yet
+git clone <this repository> && cd forecastseal
+pip install -e .          # Python 3.10 or newer
+fseal --version
+```
+
+## A 60-second tour: probability forecasts
+
+```bash
 fseal init
 cat > protocol.json <<'JSON'
-{"name": "my-forecasts", "metric": "log_loss", "n_target": 100, "alpha": 0.05, "n_comparisons": 1}
+{"name": "my-forecasts", "metric": "log_loss", "n_target": 100, "alpha": 0.05}
 JSON
-fseal register protocol.json          # prints the protocol hash
+fseal register protocol.json            # prints the protocol hash
 
 # two forecasters predict the same event; the outcome comes later
 fseal predict --id q1-A --event q1 --forecaster A --probs '{"yes":0.7,"no":0.3}'
@@ -32,127 +57,72 @@ fseal predict --id q1-B --event q1 --forecaster B --probs '{"yes":0.6,"no":0.4}'
 fseal resolve q1 yes
 
 fseal verify
-fseal head                             # publish or timestamp this hash, then later:
-fseal verify --expected-head <that hash>
-
-fseal power --sd 0.085 --delta 0.004   # how many events are needed to see a difference this small
-fseal score                            # mean loss per forecaster
-fseal calibration --forecaster A       # reliability table and ECE
-fseal test A B                         # paired comparison; refuses before n_target unless --interim
-fseal report -o report.html --compare A B   # one HTML file: scores, calibration, comparison, analysis log
+fseal head                              # publish or timestamp this hash; later: fseal verify --expected-head <hash>
+fseal power --sd 0.085 --delta 0.004    # how many events would it take to see a difference this small?
+fseal score && fseal calibration --forecaster A
+fseal test A B                          # refused before n_target unless --interim
+fseal report -o report.html --compare A B
 ```
 
-A runnable synthetic example (no real-world data) is in `examples/synthetic_demo.py`; it also writes `demo_report.html`.
-
-The report is a single HTML file with no scripts and no external requests (a strict Content-Security-Policy is embedded; every string from the ledger is escaped). If the hash chain does not verify, the report says so at the top. Asking for a comparison in the report follows the same rules as `fseal test` (refused before `n_target` unless `--interim`; every look is logged).
+`examples/synthetic_demo.py` builds a complete ledger and report from synthetic data.
 
 ## Comparing versions of a system (measured values)
 
-Not everything is a probability forecast. To compare two prompts, two models or two settings on the same items, seal a protocol of kind `measure`, record one score per system and item, and compare them with the same rules (paired items, intervals, sample size fixed in advance, looks logged):
+Not everything is a probability. To compare two prompts, models or settings on the same items, seal a protocol of kind `measure`, record one score per system and item, and compare with the same rules:
 
 ```bash
 cat > protocol.json <<'JSON'
-{"name": "prompt-versions", "kind": "measure", "metric": "quality score",
- "direction": "higher_is_better", "n_target": 40, "alpha": 0.05}
-JSON
-fseal init && fseal register protocol.json
-fseal measure --item doc-01 --system v1 --value 0.62
-fseal measure --item doc-01 --system v2 --value 0.71      # or --file scores.jsonl
-fseal score                       # mean per system
-fseal test v2 v1                  # positive favours v2 because higher is better
-fseal report -o report.html --compare v2 v1
-```
-
-A re-run of a system on an item is a new system name (`v2-run2`): measurements are append-only. `examples/prompt_versions_demo.py` shows the whole flow with synthetic scores. The scores themselves come from whatever scorer you trust; `forecastseal` does not judge them, it keeps the comparison honest.
-
-## Several metrics under one protocol
-
-Real evaluations have more than one number. Declare them all in one sealed protocol and say which ones you will draw conclusions from:
-
-```json
 {"name": "prompt-versions", "kind": "measure", "n_target": 100, "alpha": 0.05,
  "metrics": [
    {"name": "errors",   "direction": "lower_is_better",  "primary": true},
    {"name": "coverage", "direction": "higher_is_better", "primary": true},
    {"name": "style",    "direction": "higher_is_better", "primary": false}]}
+JSON
+fseal register protocol.json --manifest test_items.txt     # also seals the list of items to be evaluated
+fseal import-csv scores.csv --wide                          # item,system,errors,coverage,style
+fseal test v2 v1                                            # every metric; difference is v2 minus v1
+fseal report -o report.html --compare v2 v1
 ```
 
-- **Primary** metrics share the error budget: each interval uses `alpha / (primary metrics × planned comparisons)`.
-- **Exploratory** metrics get no adjustment and are labelled as such in the output and the report. They suggest what to test next; they do not support conclusions.
-- `fseal measure --metric errors ...` (or a `"metric"` field per JSONL line), `fseal score`, `fseal test A B` (all metrics at once, or `--metric`) and `fseal report` handle them together. The report starts with a summary table.
-- Looks are counted per metric. A protocol with a single `metric` still works as before.
-
-## Is the cheaper version as good? (non-inferiority)
-
-"Not significantly different" is not the same as "as good". To ask whether A is **not worse than B by more than a margin**, seal the margin in the protocol (in the metric's own units, chosen before looking):
-
-```json
-{"name": "cheaper-model", "kind": "measure", "metric": "quality", "direction": "higher_is_better",
- "n_target": 100, "alpha": 0.05, "margin": 0.03}
-```
-
-`fseal test cheap big` then also prints whether the interval clears the margin. The margin goes with a single `metric`, or with each entry of `metrics`. Picking the margin after seeing the data defeats the purpose; the ledger records when it was sealed.
-
-## Checking a judge against people (agreement)
-
-Record each rater's integer labels as measurements, with the rater as the system (`human`, `llm-judge`), then:
-
-```bash
-fseal agreement human llm-judge --weights quadratic   # none | linear | quadratic (for ordered labels)
-```
-
-It prints observed agreement, Cohen's kappa with a bootstrap interval, Gwet's AC1 (steadier when one label dominates) and the confusion table. Decide the acceptable level before looking: published thresholds are conventions, not rules. The look is logged like any other.
-
-## Importing results from other tools
-
-```bash
-fseal import-csv scores.csv --protocol <hash>            # long: item,system,metric,value
-fseal import-csv scores.csv --wide --protocol <hash>     # wide: item,system, then one column per metric (blank = skip)
-fseal measure --file scores.jsonl --skip-existing        # JSONL; safe to re-run
-```
-
-An import is all-or-nothing: if any row is invalid, nothing is written and the message names the rows.
-
-## Sealing the evaluation set
-
-Choosing which items to evaluate after seeing results is as bad as choosing the metric afterwards. Seal the list of item ids with the protocol:
-
-```bash
-fseal register protocol.json --manifest test_items.txt   # one id per line, or a JSON array
-fseal verify --manifest test_items.txt                   # later: same set? anything recorded outside it?
-```
-
-Only the hash and the count are stored, never the items themselves, so the ledger stays small and the list can stay private. `n_target` cannot exceed the number of sealed items. Keep a separate development set for tuning; the sealed set is for the final comparison.
+- **Primary** metrics share the error budget: each interval uses `alpha / (primary metrics × planned comparisons)`. **Exploratory** metrics get no adjustment and are labelled as such everywhere.
+- **Evaluation set.** `--manifest` seals the hash and count of the item ids (never the items). `fseal verify --manifest test_items.txt` later checks that the set is the same and that nothing outside it was recorded.
+- **Non-inferiority.** "Not significantly different" is not "as good". Seal a `"margin"` (in the metric's units, chosen before looking) and `fseal test cheap big` also says whether the interval clears it.
+- **Judge vs people.** Record integer labels from each rater as measurements, then `fseal agreement human llm-judge --weights quadratic` prints observed agreement, Cohen's kappa with an interval, Gwet's AC1 and the confusion table. Decide the acceptable level before looking.
+- **Importing.** `fseal import-csv` (long or `--wide`) and `fseal measure --file x.jsonl` are all-or-nothing: if one row is invalid, nothing is written and the message names the rows. `--skip-existing` makes re-runs safe.
+- A re-run of a system on an item is a new system name (`v2-run2`); measurements are append-only. The scores come from whatever scorer you trust. `forecastseal` does not judge them; it keeps the comparison honest. `examples/prompt_versions_demo.py` shows the flow with synthetic scores.
 
 ## Reading the statistics honestly
-- Intervals are percentile bootstrap intervals over events. With fewer than a few hundred events they can be too narrow ([Position: Don't Use the CLT in LLM Evals With Fewer Than a Few Hundred Datapoints](https://arxiv.org/pdf/2503.01747)); `test` warns below 30 events.
+
+- Intervals are percentile bootstrap intervals over items. With fewer than a few hundred items they can be too narrow ([Don't Use the CLT in LLM Evals With Fewer Than a Few Hundred Datapoints](https://arxiv.org/pdf/2503.01747)); `test` warns below 30 items.
 - Power uses a normal approximation. Treat it as a planning guide.
-- If you plan several comparisons, put the number in the protocol (`n_comparisons`); the interval is widened accordingly (Bonferroni). Running more final comparisons than planned prints a warning.
+- Planning several comparisons? Put the number in the protocol (`n_comparisons`). Running more final comparisons than planned prints a warning, and the report says so.
 
 ## What it does not prove
 
-The timestamps come from your local clock. The chain proves the ledger was **not edited after you publish or anchor its head hash somewhere you do not control** (for example a Git push, or a timestamp service such as OpenTimestamps). It cannot prove when entries were first written. Anchoring is planned as an optional step.
+Timestamps come from your local clock. The chain proves the ledger was **not changed after you publish or anchor its head hash somewhere you do not control** (a Git push, a timestamp service such as OpenTimestamps). It cannot prove when entries were first written, and deleting the *last* entries is only detectable if you saved an earlier head hash. Anchoring is planned as an optional step. See [SECURITY.md](SECURITY.md).
 
 ## Related projects
 
-These are different in scope; use them if they fit better.
+Other tools cover parts of this well. This list reflects their package summaries and READMEs at the time of writing; check their documentation for details.
 
-- [Fatebook](https://github.com/Sage-Future/fatebook): a friendly app for personal predictions, with Brier scores and calibration charts.
-- [errorbars](https://pypi.org/project/errorbars/), [abeval](https://pypi.org/project/abeval/): statistics for LLM evaluation (intervals, paired tests, power).
-- [OpenTimestamps](https://opentimestamps.org): third-party timestamp proofs.
-- [prereg-ledger](https://github.com/HarperZ9/prereg-ledger): public hashes of study plans using Git push time as the outside timestamp.
+| Project | What it does | How forecastseal differs |
+|---|---|---|
+| [evalsig](https://pypi.org/project/evalsig/), [errorbars](https://pypi.org/project/errorbars/), [evalci](https://pypi.org/project/evalci/), [abeval](https://pypi.org/project/abeval/) | Statistics for LLM evaluations: paired tests, clustered errors, power, (evalsig) sequential testing | Richer statistics than here. They do not seal a plan or keep a ledger. Use them if statistics are all you need. |
+| [calikit](https://pypi.org/project/calikit/) | Calibration auditing of probability forecasts | Deeper calibration tools; no sealing or ledger. |
+| [llm-audit-trail](https://pypi.org/project/llm-audit-trail/) | Tamper-evident audit trails for LLM lifecycles | Hash-chained logging for governance; no evaluation statistics. |
+| [Fatebook](https://github.com/Sage-Future/fatebook) | A friendly app for personal predictions with Brier scores | An app, not a protocol; no sealed plan. |
+| [prereg-ledger](https://github.com/HarperZ9/prereg-ledger) | Public hashes of study plans, using Git push time as the outside timestamp | Hashes plans only; no forecasts, scores or comparisons. |
+| [OpenTimestamps](https://opentimestamps.org) | Third-party timestamp proofs | The natural way to anchor a head hash. |
 
-`forecastseal` aims to connect the sealing, the append-only forecasts and the evaluation statistics in one small tool that runs locally.
-
-## Security
-
-See [SECURITY.md](SECURITY.md) for what the ledger does and does not protect against.
+What `forecastseal` adds is the **connection**: sealed plan, append-only records, a record of every look, and a comparison under the rules you sealed, in one small local tool.
 
 ## Development
 
 ```bash
 uv run --python 3.12 --with pytest pytest -q
 ```
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Security notes: [SECURITY.md](SECURITY.md).
 
 ## License
 

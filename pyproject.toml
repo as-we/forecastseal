@@ -11,9 +11,14 @@ license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [{ name = "as-we" }]
 keywords = ["forecasting", "preregistration", "evaluation", "calibration", "brier-score", "tamper-evident"]
+urls = { Homepage = "https://github.com/as-we/forecastseal", Issues = "https://github.com/as-we/forecastseal/issues" }
 classifiers = [
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Development Status :: 2 - Pre-Alpha",
   "Topic :: Scientific/Engineering",
 ]

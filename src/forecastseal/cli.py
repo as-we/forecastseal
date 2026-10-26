@@ -7,7 +7,7 @@ import math
 import sys
 from pathlib import Path
 
-from . import report, stats, workflow
+from . import __version__, report, stats, workflow
 from .ledger import Ledger, LedgerError, loads
 
 
@@ -302,6 +302,7 @@ def cmd_power(args):
 def main(argv=None):
     p = argparse.ArgumentParser(prog="fseal", description="Seal the plan, append forecasts, resolve outcomes, verify, score and test.")
     p.add_argument("--dir", default=".fseal", help="ledger directory (default .fseal)")
+    p.add_argument("--version", action="version", version=f"forecastseal {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def add(name, fn, help_):

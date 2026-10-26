@@ -153,7 +153,9 @@ const T = {
   foot:"正規近似による計画の目安です(forecastseal の `fseal plan` と同じ計算)。実際のデータはもっと複雑なので、数字は保証ではなく、おおまかな確認として扱ってください。",
   srclink:"GitHub の forecastseal(MIT ライセンス)",other:"English"}
 };
-let lang=(navigator.language||"en").toLowerCase().startsWith("ja")?"ja":"en";
+// language: ?lang=en or ?lang=ja wins (use it in links from English or Japanese posts); otherwise follow the browser
+const qLang=new URLSearchParams(location.search).get("lang");
+let lang=(qLang==="en"||qLang==="ja")?qLang:((navigator.language||"en").toLowerCase().startsWith("ja")?"ja":"en");
 const $=id=>document.getElementById(id);
 function setText(){
   const t=T[lang]; document.documentElement.lang=lang;

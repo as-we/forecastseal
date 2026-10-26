@@ -42,3 +42,9 @@ def test_page_has_no_network_and_a_strict_policy():
     external = re.findall(r"(?:src|href)=\"(https?://[^\"]+)\"", src)
     assert external == ["https://github.com/as-we/forecastseal"]       # one plain link to the project, nothing that loads a resource
     assert "fetch(" not in src and "XMLHttpRequest" not in src
+
+
+def test_page_accepts_a_lang_parameter_and_otherwise_follows_the_browser():
+    src = PAGE.read_text(encoding="utf-8")
+    assert 'new URLSearchParams(location.search).get("lang")' in src and 'qLang==="en"||qLang==="ja"' in src
+    assert 'navigator.language' in src                       # default: the visitor's browser language

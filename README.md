@@ -6,7 +6,7 @@ Seal your evaluation plan before the results exist, keep forecasts and scores in
 
 ## The idea
 
-Most mistakes in forecasting and in evaluating models or prompts are not maths mistakes. They are process mistakes: the metric was picked after seeing the numbers, the sample was too small to see anything, or the best of twenty variants was reported as if it were the only one tried.
+Many mistakes in forecasting and in evaluating models or prompts may come less from the maths than from the process: the metric is picked after seeing the numbers, the sample is too small to see anything, or the best of twenty variants is reported as if it were the only one tried.
 
 `forecastseal` makes the process explicit and checkable:
 
@@ -19,7 +19,7 @@ It is small (standard library only), runs locally and makes no network calls.
 
 ## What this gets you
 
-| Without it | With it |
+| Without it, this can happen | With it |
 |---|---|
 | "v2 looks better", after twenty variants were tried and the best one kept | The plan says what will be compared. Every look is logged, exploratory metrics are labelled and unadjusted, and the report warns when more final comparisons were run than planned. |
 | The metric, threshold or margin is chosen after seeing the numbers | They are sealed before the first result. Changing any of them changes the hash. |
@@ -64,7 +64,7 @@ fseal test A B                          # refused before n_target unless --inter
 fseal report -o report.html --compare A B
 ```
 
-`examples/synthetic_demo.py` builds a complete ledger and report from synthetic data. `examples/noise_demo.py` shows why sealing matters: with no real effect anywhere, reporting the best of 20 metrics finds something "significant" in about two studies out of three (1 − 0.95²⁰ ≈ 64%), while one metric named in advance does so 5% of the time.
+`examples/synthetic_demo.py` builds a complete ledger and report from synthetic data. `examples/noise_demo.py` illustrates why sealing may matter: in a simulation with no real effect anywhere, reporting the best of 20 metrics found something "significant" in about two studies out of three (1 − 0.95²⁰ ≈ 64% in theory), while one metric named in advance did so about 5% of the time.
 
 ## Comparing versions of a system (measured values)
 

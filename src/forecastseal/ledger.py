@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - Windows
 GENESIS = "0" * 64
 LEDGER_FILE = "ledger.jsonl"
 LOCK_FILE = ".lock"
-PROTOCOL_REQUIRED = ("name", "metric", "n_target", "alpha")
+PROTOCOL_REQUIRED = ("name", "n_target", "alpha")
 METRICS = ("log_loss", "brier")
 KINDS = ("forecast", "measure")
 DIRECTIONS = ("lower_is_better", "higher_is_better")
@@ -71,6 +71,15 @@ def clean_text(value, what: str) -> str:
     if any(unicodedata.category(c).startswith("C") for c in value):
         raise LedgerError(f"{what} contains control characters")
     return value
+
+
+def protocol_metrics(protocol: dict) -> list[dict]:
+    """The metrics a protocol defines, as [{"name", "direction", "primary"}]. A single-metric protocol has one primary metric."""
+    if protocol.get("kind", "forecast") == "forecast":
+        return [{"name": protocol["metric"], "direction": "lower_is_better", "primary": True}]
+    if "metrics" in protocol:
+        return [{"name": m["name"], "direction": m["direction"], "primary": bool(m.get("primary", False))} for m in protocol["metrics"]]
+    return [{"name": protocol["metric"], "direction": protocol["direction"], "primary": True}]
 
 
 def _is_number(v) -> bool:
@@ -178,10 +187,25 @@ class Ledger:
         if kind not in KINDS:
             raise LedgerError(f"kind must be one of {KINDS}")
         if kind == "forecast":
-            if protocol["metric"] not in METRICS:
+            if protocol.get("metric") not in METRICS:
                 raise LedgerError(f"metric must be one of {METRICS}")
-        else:  # measure: a free-text metric label and an explicit direction
-            clean_text(protocol["metric"], "metric")
+        elif "metrics" in protocol:  # several metrics under one sealed protocol
+            ms = protocol["metrics"]
+            if not isinstance(ms, list) or not ms or not all(isinstance(m, dict) for m in ms):
+                raise LedgerError("metrics must be a non-empty list of objects")
+            names = []
+            for m in ms:
+                names.append(clean_text(m.get("name"), "metric name"))
+                if m.get("direction") not in DIRECTIONS:
+                    raise LedgerError(f"metric {m.get('name')!r} needs direction: one of {DIRECTIONS}")
+                if "primary" in m and not isinstance(m["primary"], bool):
+                    raise LedgerError("primary must be true or false")
+            if len(set(names)) != len(names):
+                raise LedgerError("metric names must be unique")
+            if not any(m.get("primary") for m in ms):
+                raise LedgerError("at least one metric must be primary (the confirmatory comparison); the others are exploratory")
+        else:  # a single metric: a free-text label and an explicit direction
+            clean_text(protocol.get("metric"), "metric")
             if protocol.get("direction") not in DIRECTIONS:
                 raise LedgerError(f"a measure protocol needs direction: one of {DIRECTIONS}")
         n = protocol["n_target"]
@@ -236,36 +260,56 @@ class Ledger:
             body["meta"] = meta
         return self._append("prediction", body, now)
 
-    def measure(self, item: str, system: str, value: float, protocol_hash: str, meta: dict | None = None, now: str | None = None) -> dict:
+    def _metric_name(self, protocol: dict, metric: str | None) -> str:
+        names = [m["name"] for m in protocol_metrics(protocol)]
+        if metric is None:
+            if len(names) != 1:
+                raise LedgerError(f"this protocol has several metrics {names}; name one with metric=")
+            return names[0]
+        if metric not in names:
+            raise LedgerError(f"unknown metric {metric!r}; this protocol defines {names}")
+        return metric
+
+    def measure(self, item: str, system: str, value: float, protocol_hash: str, metric: str | None = None,
+                meta: dict | None = None, now: str | None = None) -> dict:
         """Record one score of one system on one item (for protocols of kind 'measure')."""
         item = clean_text(item, "item")
         system = clean_text(system, "system")
         protos = self.protocols()
         if protocol_hash not in protos:
             raise LedgerError("unknown protocol hash; register the protocol before measuring")
-        if protos[protocol_hash]["body"]["protocol"].get("kind", "forecast") != "measure":
+        proto = protos[protocol_hash]["body"]["protocol"]
+        if proto.get("kind", "forecast") != "measure":
             raise LedgerError("this protocol is a forecast protocol; use predict(), not measure()")
+        metric = self._metric_name(proto, metric)
         if not _is_number(value):
             raise LedgerError("value must be a finite number")
-        if any(e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash and e["body"]["item"] == item and e["body"]["system"] == system
-               for e in self.entries()):
-            raise LedgerError(f"{system!r} already has a value for item {item!r} (append-only; give a re-run a new system name)")
-        body = {"id": f"{system}::{item}", "item": item, "system": system, "protocol": protocol_hash, "value": value}
+        if any(e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash and e["body"]["item"] == item
+               and e["body"]["system"] == system and e["body"].get("metric", metric) == metric for e in self.entries()):
+            raise LedgerError(f"{system!r} already has a value for item {item!r} on {metric!r} (append-only; give a re-run a new system name)")
+        multi = len(protocol_metrics(proto)) > 1
+        body = {"id": f"{system}::{item}" + (f"::{metric}" if multi else ""), "item": item, "system": system, "protocol": protocol_hash, "value": value}
+        if multi:
+            body["metric"] = metric
         if meta is not None:
             if not isinstance(meta, dict) or len(canonical(meta)) > MAX_META_BYTES:
                 raise LedgerError("meta must be a small JSON object")
             body["meta"] = meta
         return self._append("measurement", body, now)
 
-    def measured_items(self, protocol_hash: str) -> list[dict]:
-        """One row per measurement under a protocol, shaped like resolved_items() rows."""
+    def measured_items(self, protocol_hash: str, metric: str | None = None) -> list[dict]:
+        """One row per measurement of one metric, shaped like resolved_items() rows."""
+        proto = self.protocols()[protocol_hash]["body"]["protocol"]
+        metric = self._metric_name(proto, metric)
+        multi = len(protocol_metrics(proto)) > 1
         return [{"id": e["body"]["id"], "event": e["body"]["item"], "forecaster": e["body"]["system"], "value": e["body"]["value"]}
-                for e in self.entries() if e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash]
+                for e in self.entries() if e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash
+                and (e["body"].get("metric") == metric if multi else True)]
 
-    def items_for(self, protocol_hash: str) -> list[dict]:
+    def items_for(self, protocol_hash: str, metric: str | None = None) -> list[dict]:
         """Rows used for scoring, whichever kind the protocol is."""
         kind = self.protocols()[protocol_hash]["body"]["protocol"].get("kind", "forecast")
-        return self.measured_items(protocol_hash) if kind == "measure" else self.resolved_items(protocol_hash)
+        return self.measured_items(protocol_hash, metric) if kind == "measure" else self.resolved_items(protocol_hash)
 
     def resolve(self, event: str, outcome: str, now: str | None = None) -> dict:
         event = clean_text(event, "event")
@@ -280,11 +324,14 @@ class Ledger:
             raise LedgerError(f"event {event!r} is already resolved")
         return self._append("outcome", {"event": event, "outcome": outcome}, now)
 
-    def log_analysis(self, protocol_hash: str, kind: str, what: str, n_resolved: int, now: str | None = None) -> dict:
+    def log_analysis(self, protocol_hash: str, kind: str, what: str, n_resolved: int, metric: str | None = None, now: str | None = None) -> dict:
         """Every look at the results is recorded, so interim peeking stays visible."""
         if protocol_hash not in self.protocols():
             raise LedgerError("unknown protocol hash")
-        return self._append("analysis", {"protocol": protocol_hash, "kind": kind, "what": clean_text(what, "analysis"), "n_resolved": n_resolved}, now)
+        body = {"protocol": protocol_hash, "kind": kind, "what": clean_text(what, "analysis"), "n_resolved": n_resolved}
+        if metric is not None:
+            body["metric"] = clean_text(metric, "metric")
+        return self._append("analysis", body, now)
 
     def resolved_items(self, protocol_hash: str) -> list[dict]:
         """One row per resolved prediction under a protocol."""
@@ -333,6 +380,7 @@ class Ledger:
         resolved: set[str] = set()
         hashes: set[str] = set()
         protocol_kinds: dict[str, str] = {}
+        protocol_metric_names: dict[str, list[str]] = {}
         measured: set[tuple] = set()
         for i, e in enumerate(self.entries(), 1):
             try:
@@ -353,6 +401,10 @@ class Ledger:
                 if t == "protocol":
                     protos.add(e.get("hash"))
                     protocol_kinds[e.get("hash")] = (b.get("protocol") or {}).get("kind", "forecast")
+                    try:
+                        protocol_metric_names[e.get("hash")] = [m["name"] for m in protocol_metrics(b.get("protocol") or {})]
+                    except Exception:
+                        protocol_metric_names[e.get("hash")] = []
                 elif t == "prediction":
                     if b.get("protocol") not in protos:
                         problems.append(f"entry {i}: prediction refers to an unregistered protocol")
@@ -379,7 +431,10 @@ class Ledger:
                         problems.append(f"entry {i}: measurement refers to an unregistered protocol")
                     elif pk != "measure":
                         problems.append(f"entry {i}: measurement under a forecast protocol")
-                    key = (b.get("protocol"), b.get("item"), b.get("system"))
+                    names = protocol_metric_names.get(b.get("protocol"), [])
+                    if len(names) > 1 and b.get("metric") not in names:
+                        problems.append(f"entry {i}: measurement has an unknown or missing metric")
+                    key = (b.get("protocol"), b.get("item"), b.get("system"), b.get("metric"))
                     if key in measured:
                         problems.append(f"entry {i}: duplicate measurement for {b.get('system')!r} on {b.get('item')!r}")
                     measured.add(key)

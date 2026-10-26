@@ -1,7 +1,7 @@
 import json
 import re
 import pytest
-from forecastseal import Ledger, LedgerError, report
+from forecastseal import Ledger, LedgerError, report, workflow
 from forecastseal.cli import main
 
 PROTO = {"name": "demo <b>x</b>", "metric": "log_loss", "n_target": 20, "alpha": 0.05, "n_comparisons": 1}
@@ -52,8 +52,10 @@ def test_broken_ledger_is_flagged_in_the_report(tmp_path):
 
 def test_comparison_rules_apply_to_the_report(tmp_path):
     led, h = make(tmp_path, n=10)                                   # 10 of 20 planned
-    with pytest.raises(LedgerError):
-        report.build(led, h, compare=[("A", "B")])
+    page0 = report.build(led, h, compare=[("A", "B")])               # not enough items: the report says so, no verdict, nothing logged
+    assert "Comparison not run" in page0 and led.status()["analyses"] == 0
+    with pytest.raises(LedgerError):                                 # `fseal test` itself still refuses
+        workflow.compare_logged(led, h, "A", "B")
     page = report.build(led, h, compare=[("A", "B")], interim=True)
     assert "INTERIM LOOK" in page and "no verdict" in page
     assert led.status()["analyses"] == 1                             # the look was logged

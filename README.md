@@ -2,7 +2,7 @@
 
 Seal your analysis plan before the outcome is known, append forecasts to a tamper-evident ledger, then score and test them honestly.
 
-> **Status: pre-alpha (v0.0.5).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
+> **Status: pre-alpha (v0.0.6).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
 > Also working: continuous-valued measurements for comparing versions of a system on the same items. Planned: optional OpenTimestamps anchoring.
 
 ## Why
@@ -64,6 +64,23 @@ fseal report -o report.html --compare v2 v1
 ```
 
 A re-run of a system on an item is a new system name (`v2-run2`): measurements are append-only. `examples/prompt_versions_demo.py` shows the whole flow with synthetic scores. The scores themselves come from whatever scorer you trust; `forecastseal` does not judge them, it keeps the comparison honest.
+
+## Several metrics under one protocol
+
+Real evaluations have more than one number. Declare them all in one sealed protocol and say which ones you will draw conclusions from:
+
+```json
+{"name": "prompt-versions", "kind": "measure", "n_target": 100, "alpha": 0.05,
+ "metrics": [
+   {"name": "errors",   "direction": "lower_is_better",  "primary": true},
+   {"name": "coverage", "direction": "higher_is_better", "primary": true},
+   {"name": "style",    "direction": "higher_is_better", "primary": false}]}
+```
+
+- **Primary** metrics share the error budget: each interval uses `alpha / (primary metrics × planned comparisons)`.
+- **Exploratory** metrics get no adjustment and are labelled as such in the output and the report. They suggest what to test next; they do not support conclusions.
+- `fseal measure --metric errors ...` (or a `"metric"` field per JSONL line), `fseal score`, `fseal test A B` (all metrics at once, or `--metric`) and `fseal report` handle them together. The report starts with a summary table.
+- Looks are counted per metric. A protocol with a single `metric` still works as before.
 
 ## Sealing the evaluation set
 

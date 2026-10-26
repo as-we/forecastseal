@@ -87,13 +87,13 @@ def cmd_measure(args):
         for line in Path(args.file).read_text(encoding="utf-8").splitlines():
             if line.strip():
                 r = loads(line)
-                led.measure(r["item"], r["system"], r["value"], h, meta=r.get("meta"))
+                led.measure(r["item"], r["system"], r["value"], h, metric=r.get("metric", args.metric), meta=r.get("meta"))
                 n += 1
         print(f"appended {n} measurements")
     else:
         if not (args.item and args.system and args.value is not None):
             raise LedgerError("give --item, --system and --value, or --file")
-        led.measure(args.item, args.system, args.value, _protocol_hash(led, args))
+        led.measure(args.item, args.system, args.value, _protocol_hash(led, args), metric=args.metric)
         print(f"recorded {args.system} on {args.item}: {args.value}")
 
 
@@ -127,12 +127,14 @@ def cmd_head(args):
 def cmd_score(args):
     led = _ledger(args)
     h = _protocol_hash(led, args)
-    proto = _proto(led, h)
-    res = stats.score(led.items_for(h), proto["metric"])
-    print(f"metric: {proto['metric']} ({workflow.direction_text(proto)})")
-    hib = proto.get("direction") == "higher_is_better"
-    for name, r in sorted(res.items(), key=lambda kv: -kv[1]["mean"] if hib else kv[1]["mean"]):
-        print(f"  {name:24s} n={r['n']:<5d} mean={r['mean']:.4f}")
+    ms = [workflow.pick_metric(led, h, args.metric)] if args.metric else workflow.metrics_of(led, h)
+    for m in ms:
+        res = stats.score(led.items_for(h, m["name"]), m["name"])
+        tag = "" if len(ms) == 1 else (" [primary]" if m["primary"] else " [exploratory]")
+        print(f"metric: {m['name']}{tag} ({workflow.direction_text(m['direction'])})")
+        hib = m["direction"] == "higher_is_better"
+        for name, r in sorted(res.items(), key=lambda kv: -kv[1]["mean"] if hib else kv[1]["mean"]):
+            print(f"  {name:24s} n={r['n']:<5d} mean={r['mean']:.4f}")
 
 
 def cmd_calibration(args):
@@ -149,23 +151,34 @@ def cmd_calibration(args):
         print(f"  {b['lo']:.1f}-{b['hi']:.1f}  {b['n']:6d}   {b['mean_pred']:.3f}       {b['freq']:.3f}")
 
 
-def cmd_test(args):
-    led = _ledger(args)
-    h = _protocol_hash(led, args)
-    res = workflow.compare_logged(led, h, args.a, args.b, interim=args.interim, seed=args.seed)
+def _print_comparison(res: dict) -> None:
     lo, hi = res["ci"]
-    sign = f"positive favours {args.a}" if res["higher_is_better"] else f"negative favours {args.a}"
-    print(f"{args.a} vs {args.b}  ({res['metric']}, difference = {args.a} minus {args.b}; {sign})")
-    print(f"  paired events: {res['n']}   mean difference: {res['mean_diff']:+.4f}   sd: {res['sd']:.4f}")
-    print(f"  {100 * (1 - res['alpha_adj']):.2f}% interval (alpha {res['alpha']} / {res['planned']} planned comparisons): [{lo:+.4f}, {hi:+.4f}]")
+    a, b = res["a"], res["b"]
+    sign = f"positive favours {a}" if res["higher_is_better"] else f"negative favours {a}"
+    role = ""
+    if res["multi"]:
+        role = " [primary]" if res["primary"] else " [exploratory: no multiplicity adjustment; do not draw conclusions]"
+    print(f"{a} vs {b}  ({res['metric']}{role}; difference = {a} minus {b}; {sign})")
+    print(f"  paired items: {res['n']}   mean difference: {res['mean_diff']:+.4f}   sd: {res['sd']:.4f}")
+    print(f"  {100 * (1 - res['alpha_adj']):.2f}% interval (alpha {res['alpha']} / {res['family']} in the confirmatory family): [{lo:+.4f}, {hi:+.4f}]")
     if res["n"] < 30:
-        print("  warning: fewer than 30 paired events; intervals are unreliable at this size")
+        print("  warning: fewer than 30 paired items; intervals are unreliable at this size")
     if not res["final"]:
         print("  INTERIM LOOK, not a verdict. This look is recorded in the ledger.")
     else:
         print("  verdict:", f"interval excludes 0; {res['better']} is better" if res["excludes_zero"] else "interval includes 0: no difference shown")
         if res["prior_final"] >= res["planned"]:
-            print(f"  warning: this is final analysis #{res['prior_final'] + 1}, but the protocol planned {res['planned']} comparison(s). Treat the interval as too narrow.")
+            print(f"  warning: this is final analysis #{res['prior_final'] + 1} for this metric, but the protocol planned {res['planned']} comparison(s). Treat the interval as too narrow.")
+
+
+def cmd_test(args):
+    led = _ledger(args)
+    h = _protocol_hash(led, args)
+    names = [args.metric] if args.metric else [m["name"] for m in workflow.metrics_of(led, h)]
+    for k, name in enumerate(names):
+        if k:
+            print()
+        _print_comparison(workflow.compare_logged(led, h, args.a, args.b, interim=args.interim, seed=args.seed, metric=name))
 
 
 def cmd_report(args):
@@ -184,7 +197,8 @@ def cmd_power(args):
         led = _ledger(args)
         h = _protocol_hash(led, args)
         a, b = args.from_ledger
-        d = stats.paired_diffs(led.items_for(h), _proto(led, h)["metric"], a, b)
+        m = workflow.pick_metric(led, h, args.metric)
+        d = stats.paired_diffs(led.items_for(h, m["name"]), m["name"], a, b)
         if len(d) < 2:
             raise LedgerError("need at least two paired events to estimate the spread")
         sd = stats.stdev(d)
@@ -223,15 +237,17 @@ def main(argv=None):
     s = add("measure", cmd_measure, "record a score of a system on an item (measure protocols)")
     s.add_argument("--file", help='JSONL lines like {"item": "doc-1", "system": "v2", "value": 0.83}')
     s.add_argument("--item"); s.add_argument("--system"); s.add_argument("--value", type=float); s.add_argument("--protocol")
+    s.add_argument("--metric", help="required when the protocol defines several metrics (a JSONL line may carry its own \"metric\")")
     s = add("resolve", cmd_resolve, "record the outcome of an event"); s.add_argument("event"); s.add_argument("outcome")
     s = add("verify", cmd_verify, "check the hash chain"); s.add_argument("--expected-head", help="a head hash you saved or timestamped earlier")
     s.add_argument("--manifest", help="re-check an item list against the sealed manifest and the recorded items")
     add("status", cmd_status, "counts and head hash")
     add("head", cmd_head, "print the head hash (publish or timestamp it)")
-    s = add("score", cmd_score, "mean loss per forecaster"); s.add_argument("--protocol")
+    s = add("score", cmd_score, "mean loss (or value) per forecaster or system"); s.add_argument("--protocol"); s.add_argument("--metric")
     s = add("calibration", cmd_calibration, "reliability table and ECE"); s.add_argument("--protocol"); s.add_argument("--forecaster")
     s = add("test", cmd_test, "paired comparison of two forecasters with an interval")
     s.add_argument("a"); s.add_argument("b"); s.add_argument("--protocol"); s.add_argument("--interim", action="store_true"); s.add_argument("--seed", type=int, default=43)
+    s.add_argument("--metric", help="one metric (default: every metric of the protocol)")
     s = add("report", cmd_report, "write a self-contained HTML report")
     s.add_argument("-o", "--output", default="report.html"); s.add_argument("--protocol"); s.add_argument("--seed", type=int, default=43)
     s.add_argument("--compare", nargs=2, action="append", metavar=("A", "B"), help="add a paired comparison (repeatable); logged like `test`")
@@ -239,7 +255,7 @@ def main(argv=None):
     s = add("power", cmd_power, "how many events are needed to detect a difference")
     s.add_argument("--sd", type=float); s.add_argument("--delta", type=float); s.add_argument("--n", type=int)
     s.add_argument("--alpha", type=float, default=0.05); s.add_argument("--n-comparisons", type=int, default=1)
-    s.add_argument("--from-ledger", nargs=2, metavar=("A", "B")); s.add_argument("--protocol")
+    s.add_argument("--from-ledger", nargs=2, metavar=("A", "B")); s.add_argument("--protocol"); s.add_argument("--metric")
 
     args = p.parse_args(argv)
     try:

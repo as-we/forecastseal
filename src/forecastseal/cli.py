@@ -272,6 +272,49 @@ def cmd_agreement(args):
     print("  kappa thresholds in the literature are conventions, not rules; decide the acceptable level before looking.")
 
 
+def cmd_plan(args):
+    """Is there enough data to split into explore / validate / confirm? Answers in plain numbers before any work is done."""
+    if args.rates:
+        p1, p2 = args.rates
+        needed = stats.required_n_rates(p1, p2, args.alpha / args.comparisons)
+        power_at = lambda n: stats.power_rates(n, p1, p2, args.alpha / args.comparisons)
+        what = f"telling a pass rate of {p1:g} from {p2:g} (two groups; items needed per group)"
+        mde = None
+    else:
+        if not (args.sd and args.delta):
+            raise LedgerError("give --sd and --delta (scores), or --rates P1 P2 (pass/fail)")
+        needed = stats.required_n(args.delta, args.sd, args.alpha / args.comparisons)
+        power_at = lambda n: stats.power(n, args.delta, args.sd, args.alpha / args.comparisons)
+        what = f"seeing a true difference of {args.delta:g} between two versions on the same items (spread {args.sd:g})"
+        mde = lambda n: stats.min_detectable(n, args.sd, args.alpha / args.comparisons) if n > 0 else float("nan")
+    print(f"Goal: {what}")
+    print(f"alpha {args.alpha:g}" + (f" shared by {args.comparisons} comparisons" if args.comparisons > 1 else "") + ", 80% power, two-sided")
+    print(f"The final test needs about {needed} items" + (" per group." if args.rates else "."))
+    if not args.n_total:
+        return
+    split = tuple(args.split)
+    r = stats.plan_split(args.n_total, split, needed, power_at)
+    st = r["stages"]
+    print(f"\nYou have {args.n_total} items. Split {split[0]:g}/{split[1]:g}/{split[2]:g} gives:")
+    for name, n in st.items():
+        extra = ""
+        if name == "confirm":
+            extra = f"   chance of seeing the difference: {100 * r['power_confirm']:.0f}%"
+            if mde:
+                extra += f"   smallest difference you could see: {mde(n):.4f}"
+        print(f"  {name:9s} {n:6d} items{extra}")
+    pct = 100 * r["sufficiency"]
+    print(f"\nFinal test: you would have {pct:.0f}% of the {needed} items it needs.")
+    if r["sufficiency"] >= 1:
+        print("Verdict: enough. Keep the final part untouched until the plan is sealed.")
+    elif r["if_all_data_confirm"] >= 1:
+        print(f"Verdict: not with this split. The final test needs {needed} items, so at most {r['max_before_confirm']} items can go to exploring and validating. "
+              "Use fewer exploratory items, or skip a separate validation stage.")
+    else:
+        print(f"Verdict: not enough data. Even all {args.n_total} items would be {100 * r['if_all_data_confirm']:.0f}% of what the final test needs. "
+              "Splitting would only make it worse. Options: collect more data going forward (prospective), accept a larger smallest difference, or treat every result as exploratory and say so.")
+
+
 def cmd_power(args):
     sd = args.sd
     if args.from_ledger:
@@ -342,6 +385,11 @@ def main(argv=None):
     s = add("agreement", cmd_agreement, "agreement (Cohen's kappa, AC1) between two raters on the same items")
     s.add_argument("a"); s.add_argument("b"); s.add_argument("--protocol"); s.add_argument("--metric")
     s.add_argument("--weights", choices=["none", "linear", "quadratic"], default="none"); s.add_argument("--seed", type=int, default=43)
+    s = add("plan", cmd_plan, "is there enough data to split into explore / validate / confirm?")
+    s.add_argument("--n-total", type=int, help="items you have"); s.add_argument("--split", nargs=3, type=float, default=[50.0, 20.0, 30.0], metavar=("EXPLORE", "VALIDATE", "CONFIRM"))
+    s.add_argument("--delta", type=float, help="smallest true difference you care about (scores)"); s.add_argument("--sd", type=float, help="spread of the per-item differences (scores)")
+    s.add_argument("--rates", nargs=2, type=float, metavar=("P1", "P2"), help="pass/fail instead of scores: the two rates you want to tell apart")
+    s.add_argument("--alpha", type=float, default=0.05); s.add_argument("--comparisons", type=int, default=1)
     s = add("power", cmd_power, "how many events are needed to detect a difference")
     s.add_argument("--sd", type=float); s.add_argument("--delta", type=float); s.add_argument("--n", type=int)
     s.add_argument("--alpha", type=float, default=0.05); s.add_argument("--n-comparisons", type=int, default=1)

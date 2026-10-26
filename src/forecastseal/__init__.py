@@ -3,4 +3,4 @@ from .ledger import Ledger, LedgerError, canonical, entry_hash
 from . import stats
 
 __all__ = ["Ledger", "LedgerError", "canonical", "entry_hash", "stats"]
-__version__ = "0.0.7"
+__version__ = "0.0.8"

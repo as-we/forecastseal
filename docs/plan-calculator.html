@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Do you have enough data?</title>
+<style>
+/* One page, no server, no network. Works offline. Layout: inputs left, the answer right (stacked on phones). */
+:root{--bg:#f4f6f7;--panel:#fff;--fg:#14181f;--muted:#586272;--line:#d6dce2;--accent:#0a6f6a;--soft:#dcefed;--good:#1b7a3d;--goodbg:#e0f3e6;--warn:#9a5700;--warnbg:#fbeedb;--bad:#b3342a;--badbg:#fbe4e1}
+@media (prefers-color-scheme:dark){:root{--bg:#11161b;--panel:#181f26;--fg:#e8edf1;--muted:#9aa7b4;--line:#2b3541;--accent:#4cc7bd;--soft:#14312f;--good:#6fd18f;--goodbg:#173424;--warn:#e3a35a;--warnbg:#382a15;--bad:#ee7d72;--badbg:#3b1d1a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 system-ui,-apple-system,"Segoe UI","Hiragino Sans","Yu Gothic",sans-serif;padding:24px max(16px,env(safe-area-inset-right,0px)) 48px max(16px,env(safe-area-inset-left,0px))}
+main{max-width:940px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+header{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
+h1{font-size:24px;line-height:1.3;margin:0 0 4px;text-wrap:balance}
+.lead{color:var(--muted);margin:0;max-width:60ch}
+button.lang{border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:6px;padding:6px 12px;font:inherit;cursor:pointer}
+button.lang:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+@media (max-width:760px){.grid{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;min-width:0}
+fieldset{border:0;margin:0;padding:0;display:flex;flex-direction:column;gap:12px}
+legend{font-weight:600;margin-bottom:6px;padding:0}
+label{display:flex;flex-direction:column;gap:3px;font-size:14px}
+label small{color:var(--muted)}
+input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);width:100%;min-width:0}
+.row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.modes{display:flex;gap:8px;flex-wrap:wrap}
+.modes label{flex-direction:row;align-items:center;gap:6px;border:1px solid var(--line);border-radius:6px;padding:6px 10px;cursor:pointer}
+.modes input{width:auto}
+.big{font-size:44px;font-weight:700;line-height:1.1;margin:0}
+.meter{height:12px;background:var(--bg);border:1px solid var(--line);border-radius:6px;overflow:hidden;margin:8px 0 12px}
+.meter i{display:block;height:100%;background:var(--accent);width:0}
+.verdict{border-radius:6px;padding:10px 12px;font-size:14px;margin:12px 0 0}
+.good{background:var(--goodbg);color:var(--good)}.warn{background:var(--warnbg);color:var(--warn)}.bad{background:var(--badbg);color:var(--bad)}
+table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600;font-size:12px}td.n{text-align:right;font-variant-numeric:tabular-nums}
+.note{color:var(--muted);font-size:13px;margin:0}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div>
+    <h1 id="t-title"></h1>
+    <p class="lead" id="t-lead"></p>
+  </div>
+  <button class="lang" id="lang" type="button"></button>
+</header>
+
+<div class="grid">
+  <div class="card">
+    <fieldset>
+      <legend id="t-kind"></legend>
+      <div class="modes">
+        <label><input type="radio" name="mode" value="scores" checked><span id="t-m-scores"></span></label>
+        <label><input type="radio" name="mode" value="rates"><span id="t-m-rates"></span></label>
+      </div>
+      <label><span id="t-n"></span><input id="n" type="number" min="2" step="1" value="300" inputmode="numeric"><small id="t-n-h"></small></label>
+      <div id="scores-box">
+        <label><span id="t-delta"></span><input id="delta" type="number" min="0" step="any" value="0.05" inputmode="decimal"><small id="t-delta-h"></small></label>
+        <label style="margin-top:12px"><span id="t-sd"></span><input id="sd" type="number" min="0" step="any" value="0.2" inputmode="decimal"><small id="t-sd-h"></small></label>
+      </div>
+      <div id="rates-box" hidden>
+        <div class="row" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+          <label><span id="t-p1"></span><input id="p1" type="number" min="0.01" max="0.99" step="0.01" value="0.70" inputmode="decimal"></label>
+          <label><span id="t-p2"></span><input id="p2" type="number" min="0.01" max="0.99" step="0.01" value="0.80" inputmode="decimal"></label>
+        </div>
+        <small class="note" id="t-rates-h"></small>
+      </div>
+      <div>
+        <div style="font-size:14px;margin-bottom:3px" id="t-split"></div>
+        <div class="row">
+          <label><span id="t-s1"></span><input id="s1" type="number" min="0" max="100" step="1" value="50"></label>
+          <label><span id="t-s2"></span><input id="s2" type="number" min="0" max="100" step="1" value="20"></label>
+          <label><span id="t-s3"></span><input id="s3" type="number" min="0" max="100" step="1" value="30" readonly></label>
+        </div>
+      </div>
+      <div class="row" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+        <label><span id="t-alpha"></span><select id="alpha"><option value="0.05" selected>5%</option><option value="0.01">1%</option><option value="0.1">10%</option></select></label>
+        <label><span id="t-comp"></span><input id="comp" type="number" min="1" step="1" value="1"></label>
+      </div>
+    </fieldset>
+  </div>
+
+  <div class="card" aria-live="polite">
+    <p class="note" id="t-have"></p>
+    <p class="big" id="pct">–</p>
+    <div class="meter" aria-hidden="true"><i id="bar"></i></div>
+    <table>
+      <thead><tr><th id="t-th-stage"></th><th class="n" id="t-th-n"></th></tr></thead>
+      <tbody id="stages"></tbody>
+    </table>
+    <p class="note" id="detail" style="margin-top:10px"></p>
+    <div class="verdict" id="verdict"></div>
+  </div>
+</div>
+<p class="note" id="t-foot"></p>
+</main>
+
+<script>
+// ---- pure maths (same formulas as `fseal plan`; no DOM) ----
+const FS = (() => {
+  function normInv(p) {            // Acklam's rational approximation, relative error ~1e-9
+    const a=[-3.969683028665376e+01,2.209460984245205e+02,-2.759285104469687e+02,1.383577518672690e+02,-3.066479806614716e+01,2.506628277459239e+00];
+    const b=[-5.447609879822406e+01,1.615858368580409e+02,-1.556989798598866e+02,6.680131188771972e+01,-1.328068155288572e+01];
+    const c=[-7.784894002430293e-03,-3.223964580411365e-01,-2.400758277161838e+00,-2.549732539343734e+00,4.374664141464968e+00,2.938163982698783e+00];
+    const d=[7.784695709041462e-03,3.224671290700398e-01,2.445134137142996e+00,3.754408661907416e+00];
+    const pl=0.02425, ph=1-pl; let q,r;
+    if (p<pl){q=Math.sqrt(-2*Math.log(p));return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);}
+    if (p>ph){q=Math.sqrt(-2*Math.log(1-p));return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);}
+    q=p-0.5;r=q*q;return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q/(((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1);
+  }
+  function normCdf(x) {            // standard normal CDF via erfc (Numerical Recipes erfcc, error < 1.2e-7)
+    const z=Math.abs(x/Math.SQRT2), s=1/(1+0.5*z);
+    const r=s*Math.exp(-z*z-1.26551223+s*(1.00002368+s*(0.37409196+s*(0.09678418+s*(-0.18628806+s*(0.27886807+s*(-1.13520398+s*(1.48851587+s*(-0.82215223+s*0.17087277)))))))));
+    return x>=0 ? 1-0.5*r : 0.5*r;
+  }
+  const zA = (alpha) => normInv(1 - alpha/2);
+  function requiredN(delta, sd, alpha, pw=0.8){ return Math.ceil(Math.pow((zA(alpha)+normInv(pw))*sd/Math.abs(delta),2)); }
+  function powerScores(n, delta, sd, alpha){ if(n<1||sd<=0) return NaN; const se=sd/Math.sqrt(n), crit=zA(alpha), z=Math.abs(delta)/se; return (1-normCdf(crit-z))+normCdf(-crit-z); }
+  function minDetectable(n, sd, alpha, pw=0.8){ return (zA(alpha)+normInv(pw))*sd/Math.sqrt(n); }
+  function requiredNRates(p1,p2,alpha,pw=0.8){ const pb=(p1+p2)/2; const num=Math.pow(zA(alpha)*Math.sqrt(2*pb*(1-pb))+normInv(pw)*Math.sqrt(p1*(1-p1)+p2*(1-p2)),2); return Math.ceil(num/Math.pow(p1-p2,2)); }
+  function powerRates(n,p1,p2,alpha){ if(n<1) return NaN; const pb=(p1+p2)/2, se0=Math.sqrt(2*pb*(1-pb)/n), se1=Math.sqrt((p1*(1-p1)+p2*(1-p2))/n); return normCdf((Math.abs(p1-p2)-zA(alpha)*se0)/se1); }
+  function planSplit(N, split, needed){ const ns=split.map(s=>Math.floor(N*s/100)); ns[2]+=N-ns[0]-ns[1]-ns[2]; return {ns, sufficiency: ns[2]/needed, allData: N/needed, maxBefore: Math.max(0,N-needed)}; }
+  return {normInv, normCdf, requiredN, powerScores, minDetectable, requiredNRates, powerRates, planSplit};
+})();
+</script>
+<script>
+// ---- page ----
+const T = {
+ en:{title:"Do you have enough data?",lead:"Before you split data into explore / validate / confirm, check that the final test could show anything. Everything runs in your browser; nothing is sent anywhere.",kind:"What are you comparing?",mscores:"Scores (0–1, 1–5, minutes…)",mrates:"Pass / fail rates",n:"How many items do you have?",nh:"Documents, rows, cases, questions: whatever one 'item' is.",delta:"Smallest difference you care about",deltah:"In the same units as your scores. If a 5-point gain would not change your decision, use 5.",sd:"How much the difference varies from item to item",sdh:"Not sure? Try a small pilot, or start with about half the typical score range.",p1:"Current pass rate (0–1)",p2:"Pass rate you hope to see (0–1)",rh:"Treated as two separate groups, which is a cautious estimate when the same items are scored twice.",split:"How will you split the items? (%)",s1:"Explore",s2:"Validate",s3:"Confirm (final test)",alpha:"Chance of a false alarm",comp:"How many comparisons will you make?",have:"For the final test you would have",stage:"Part",items:"Items",
+  explore:"Explore (look at anything)",validate:"Validate (choose between options)",confirm:"Confirm (one look, at the end)",
+  need:(n,r)=>`The final test needs about ${n} items${r?" per group":""}.`,
+  chance:(p)=>`With the final part alone, the chance of seeing a real difference of that size is ${p}%.`,
+  mde:(d)=>`The smallest difference it could show reliably is about ${d}.`,
+  okv:"Enough. Keep the final part untouched (and away from the AI) until your plan is written down.",
+  splitv:(m)=>`Not with this split. The final test needs more items, so at most ${m} items can go to exploring and validating. Explore with fewer items, or skip a separate validation step.`,
+  lowv:(p)=>`Not enough data. Even all your items would be ${p}% of what the final test needs, and splitting makes it worse. Options: collect more data going forward, accept a larger smallest difference, or treat every result as a hint and say so.`,
+  foot:"A planning guide using a normal approximation (the same maths as `fseal plan` in forecastseal). Real data is messier: treat the numbers as a rough check, not a guarantee.",
+  other:"日本語"},
+ ja:{title:"データは足りていますか?",lead:"データを「探索・確認・本番」に分ける前に、最後の確かめで何かが見えるかを調べます。計算はすべてブラウザの中で行い、どこにも送信しません。",kind:"何を比べますか?",mscores:"点数(0〜1、1〜5、分など)",mrates:"合格率・成功率",n:"手元の件数は?",nh:"文書、行、ケース、問題など、「1 件」にあたるもの。",delta:"見つけたい最小の差",deltah:"点数と同じ単位で。5 点の改善では判断が変わらないなら、5 にします。",sd:"件ごとの差のばらつき",sdh:"分からなければ、小さな試験をするか、点数の幅の半分くらいから始めます。",p1:"いまの合格率(0〜1)",p2:"期待する合格率(0〜1)",rh:"2 つの別のグループとして計算します。同じ件を 2 回採点する場合は、慎重な見積もりになります。",split:"件数をどう分けますか?(%)",s1:"探索",s2:"確認",s3:"本番(最後の確かめ)",alpha:"誤って「差がある」と言う確率",comp:"比較する回数は?",have:"本番に使える件数は、必要な件数の",stage:"区分",items:"件数",
+  explore:"探索(自由に見てよい)",validate:"確認(候補から選ぶ)",confirm:"本番(最後に 1 回だけ見る)",
+  need:(n,r)=>`本番の確かめには、約 ${n} 件が必要です${r?"(各グループ)":""}。`,
+  chance:(p)=>`本番の分だけで、その大きさの本当の差が見つかる確率は ${p}% です。`,
+  mde:(d)=>`確実に見つけられる最小の差は、約 ${d} です。`,
+  okv:"足ります。計画を書き留めるまで、本番の分には手を付けず、AI にも見せないでください。",
+  splitv:(m)=>`この分け方では足りません。本番に必要な件数があるので、探索と確認に回せるのは、最大でも ${m} 件です。探索の件数を減らすか、確認の段階を省いてください。`,
+  lowv:(p)=>`データが足りません。全部を本番に使っても、必要な件数の ${p}% で、分けるとさらに悪くなります。対策は、これから先のデータを集める、見つけたい差を大きくする、すべての結果を「ヒント」として扱ってそう書く、のどれかです。`,
+  foot:"正規近似による計画の目安です(forecastseal の `fseal plan` と同じ計算)。実際のデータはもっと複雑なので、数字は保証ではなく、おおまかな確認として扱ってください。",
+  other:"English"}
+};
+let lang=(navigator.language||"en").toLowerCase().startsWith("ja")?"ja":"en";
+const $=id=>document.getElementById(id);
+function setText(){
+  const t=T[lang]; document.documentElement.lang=lang;
+  const map={"t-title":"title","t-lead":"lead","t-kind":"kind","t-m-scores":"mscores","t-m-rates":"mrates","t-n":"n","t-n-h":"nh","t-delta":"delta","t-delta-h":"deltah","t-sd":"sd","t-sd-h":"sdh","t-p1":"p1","t-p2":"p2","t-rates-h":"rh","t-split":"split","t-s1":"s1","t-s2":"s2","t-s3":"s3","t-alpha":"alpha","t-comp":"comp","t-have":"have","t-th-stage":"stage","t-th-n":"items","t-foot":"foot"};
+  for(const k in map) $(k).textContent=t[map[k]];
+  $("lang").textContent=t.other; document.title=t.title; calc();
+}
+function calc(){
+  const t=T[lang], N=Math.max(2,Math.floor(+$("n").value||0)), alpha=(+$("alpha").value)/Math.max(1,Math.floor(+$("comp").value||1));
+  const s1=Math.min(100,Math.max(0,+$("s1").value||0)), s2=Math.min(100-s1,Math.max(0,+$("s2").value||0)); $("s3").value=Math.round((100-s1-s2)*100)/100;
+  const split=[s1,s2,100-s1-s2], rates=document.querySelector('input[name=mode]:checked').value==="rates";
+  $("scores-box").hidden=rates; $("rates-box").hidden=!rates;
+  let needed, powerAt, mde=null;
+  if(rates){ const p1=+$("p1").value,p2=+$("p2").value; if(!(p1>0&&p1<1&&p2>0&&p2<1&&p1!==p2)){return out("–",0,"",t.rh,"warn",[])}
+    needed=FS.requiredNRates(p1,p2,alpha); powerAt=n=>FS.powerRates(n,p1,p2,alpha); }
+  else { const d=+$("delta").value, sd=+$("sd").value; if(!(d>0&&sd>0)){return out("–",0,"","","warn",[])}
+    needed=FS.requiredN(d,sd,alpha); powerAt=n=>FS.powerScores(n,d,sd,alpha); mde=n=>FS.minDetectable(n,sd,alpha); }
+  const r=FS.planSplit(N,split,needed), pct=Math.round(100*r.sufficiency);
+  const confirm=r.ns[2]; let detail=t.need(needed,rates)+" "+t.chance(Math.round(100*powerAt(confirm)));
+  if(mde&&confirm>0) detail+=" "+t.mde(mde(confirm).toPrecision(2));
+  let cls,msg; if(r.sufficiency>=1){cls="good";msg=t.okv}else if(r.allData>=1){cls="warn";msg=t.splitv(r.maxBefore)}else{cls="bad";msg=t.lowv(Math.round(100*r.allData))}
+  out(pct+"%",Math.min(100,pct),detail,msg,cls,[[t.explore,r.ns[0]],[t.validate,r.ns[1]],[t.confirm,r.ns[2]]]);
+}
+function out(big,w,detail,msg,cls,rows){ $("pct").textContent=big; $("bar").style.width=w+"%"; $("detail").textContent=detail; const v=$("verdict"); v.textContent=msg; v.className="verdict "+cls; v.hidden=!msg;
+  const tb=$("stages"); tb.textContent=""; rows.forEach(([a,n])=>{const tr=document.createElement("tr"),x=document.createElement("td"),y=document.createElement("td"); y.className="n"; x.textContent=a; y.textContent=n; tr.append(x,y); tb.append(tr);}); }
+document.querySelectorAll("input,select").forEach(e=>e.addEventListener("input",calc));
+$("lang").addEventListener("click",()=>{lang=lang==="ja"?"en":"ja";setText();});
+setText();
+</script>
+</body>
+</html>

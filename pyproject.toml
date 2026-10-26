@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "forecastseal"
-version = "0.0.7"
+version = "0.0.8"
 description = "Seal your analysis plan before the outcome, append forecasts to a tamper-evident ledger, then score and test them."
 readme = "README.md"
 license = { text = "MIT" }

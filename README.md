@@ -2,7 +2,7 @@
 
 Seal your evaluation plan before the results exist, keep forecasts and scores in a tamper-evident ledger, then test the comparison honestly.
 
-> **Status: pre-alpha (v0.0.7), not on PyPI yet.** The command line, the ledger format and the report may still change.
+> **Status: pre-alpha (v0.0.8), not on PyPI yet.** The command line, the ledger format and the report may still change.
 
 ## The idea
 
@@ -90,6 +90,27 @@ fseal report -o report.html --compare v2 v1
 - **Judge vs people.** Record integer labels from each rater as measurements, then `fseal agreement human llm-judge --weights quadratic` prints observed agreement, Cohen's kappa with an interval, Gwet's AC1 and the confusion table. Decide the acceptable level before looking.
 - **Importing.** `fseal import-csv` (long or `--wide`) and `fseal measure --file x.jsonl` are all-or-nothing: if one row is invalid, nothing is written and the message names the rows. `--skip-existing` makes re-runs safe.
 - A re-run of a system on an item is a new system name (`v2-run2`); measurements are append-only. The scores come from whatever scorer you trust. `forecastseal` does not judge them; it keeps the comparison honest. `examples/prompt_versions_demo.py` shows the flow with synthetic scores.
+
+## Do you have enough data? (`fseal plan` and a one-page calculator)
+
+Splitting data into explore / validate / confirm is pointless if the final part is too small to show anything. Ask first:
+
+```bash
+fseal plan --n-total 300 --delta 0.01 --sd 0.085          # scores: smallest difference you care about, and its spread
+fseal plan --n-total 500 --rates 0.70 0.80                # pass/fail rates
+```
+
+```
+The final test needs about 568 items.
+You have 300 items. Split 50/20/30 gives:
+  confirm       90 items   chance of seeing the difference: 20%   smallest difference you could see: 0.0251
+Final test: you would have 16% of the 568 items it needs.
+Verdict: not enough data. Even all 300 items would be 53% of what the final test needs. ...
+```
+
+If there is not enough data, the honest options are to collect more going forward (prospectively), to accept a larger smallest difference, or to treat every result as a hint and say so.
+
+[`docs/plan-calculator.html`](docs/plan-calculator.html) is the same calculation as a single offline page (English and Japanese, no network, no install): open it in a browser.
 
 ## Reading the statistics honestly
 

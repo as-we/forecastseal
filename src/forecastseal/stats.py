@@ -196,3 +196,45 @@ def agreement(a: list[float], b: list[float], weights: str = "none", n_boot: int
     share = max(max(sum(1 for v in a if v == l), sum(1 for v in b if v == l)) for l in labs) / n
     return {"n": n, "observed": sum(1 for x, y in zip(a, b) if x == y) / n, "kappa": k, "ci": (lo, hi), "weights": weights,
             "ac1": gwet_ac1(a, b), "labels": labs, "confusion": conf, "top_label_share": share}
+
+
+# ---------------- planning: is there enough data? ----------------
+def power_rates(n_per_group: int, p1: float, p2: float, alpha: float) -> float:
+    """Power to tell two pass/fail rates apart with n items per group (independent groups, normal approximation).
+    Conservative for paired designs, where the same items are scored twice."""
+    if n_per_group < 1 or not (0 < p1 < 1 and 0 < p2 < 1) or p1 == p2:
+        return float("nan")
+    pbar = (p1 + p2) / 2
+    za = _N.inv_cdf(1 - alpha / 2)
+    se0 = math.sqrt(2 * pbar * (1 - pbar) / n_per_group)
+    se1 = math.sqrt((p1 * (1 - p1) + p2 * (1 - p2)) / n_per_group)
+    z = (abs(p1 - p2) - za * se0) / se1
+    return _N.cdf(z)
+
+
+def required_n_rates(p1: float, p2: float, alpha: float, target_power: float = 0.8) -> int:
+    """Items needed per group to tell two pass/fail rates apart."""
+    if not (0 < p1 < 1 and 0 < p2 < 1) or p1 == p2:
+        raise ValueError("rates must be between 0 and 1 and different")
+    pbar = (p1 + p2) / 2
+    za = _N.inv_cdf(1 - alpha / 2)
+    zb = _N.inv_cdf(target_power)
+    num = (za * math.sqrt(2 * pbar * (1 - pbar)) + zb * math.sqrt(p1 * (1 - p1) + p2 * (1 - p2))) ** 2
+    return math.ceil(num / (p1 - p2) ** 2)
+
+
+def plan_split(n_total: int, split: tuple[float, float, float], needed: int, power_at) -> dict:
+    """How a data set divides into explore / validate / confirm, and what the confirm part can show.
+
+    ``needed``: items the final test needs. ``power_at(n)``: power of a test with n items.
+    sufficiency = items you have for the final test / items it needs (can exceed 100%).
+    """
+    if abs(sum(split) - 100) > 1e-6 or any(s < 0 for s in split):
+        raise ValueError("split must be three non-negative percentages that add up to 100")
+    ns = [int(n_total * s / 100) for s in split]
+    ns[2] += n_total - sum(ns)                       # leftovers go to the final test
+    confirm = ns[2]
+    return {"n_total": n_total, "stages": dict(zip(("explore", "validate", "confirm"), ns)), "needed": needed,
+            "sufficiency": confirm / needed if needed else float("nan"), "power_confirm": power_at(confirm),
+            "if_all_data_confirm": n_total / needed if needed else float("nan"),
+            "max_before_confirm": max(0, n_total - needed)}

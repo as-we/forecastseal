@@ -19,3 +19,12 @@ def test_noise_demo_shows_the_inflation_and_the_labels(tmp_path, capsys):
     m.one_study(tmp_path / "noise_ledger")
     out = capsys.readouterr().out
     assert "primary (declared before the data)" in out and "exploratory (found after looking)" in out and "intact" in out
+
+
+def test_peeking_demo_shows_inflated_false_alarms_and_exaggerated_estimates():
+    m = load("peeking_demo")
+    m.STUDIES = 600
+    f0, p0, _ = m.run(0.0, seed=2)
+    f1, p1, est = m.run(0.2, seed=2)
+    assert p0 > f0 + 0.08                                   # peeking inflates false alarms well above the single look
+    assert est > 0.3                                         # stopped-early estimates exceed the true 0.2

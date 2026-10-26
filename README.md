@@ -2,7 +2,22 @@
 
 Seal your evaluation plan before the results exist, keep forecasts and scores in a tamper-evident ledger, then test the comparison honestly.
 
-> **Status: pre-alpha (v0.0.8), not on PyPI yet.** The command line, the ledger format and the report may still change.
+> **Status: pre-alpha (v0.0.9), not on PyPI yet.** The command line, the ledger format and the report may still change.
+
+## See it in 30 seconds
+
+```bash
+python examples/noise_demo.py
+```
+
+```text
+2000 studies, no real effect anywhere, 200 items, 20 metrics each:
+  one metric named in advance ........... 'significant' in  4.8% of studies  (as designed: 5%)
+  best of 20, reported as if it were the only one: 66.3% of studies  (1 - 0.95^20 = 64.2%)
+  best of 20, but paying for the 20 tries:  6.0% of studies
+```
+
+Nothing real is going on in that data. Reporting the best of many tries can still look like a discovery. `forecastseal` is a small tool for making that kind of process visible. For a second demo, `examples/peeking_demo.py` shows what looking early and stopping when it looks good does to false alarms and to estimates.
 
 ## The idea
 
@@ -96,6 +111,21 @@ fseal report -o report.html --compare v2 v1
 - **Judge vs people.** Record integer labels from each rater as measurements, then `fseal agreement human llm-judge --weights quadratic` prints observed agreement, Cohen's kappa with an interval, Gwet's AC1 and the confusion table. Decide the acceptable level before looking.
 - **Importing.** `fseal import-csv` (long or `--wide`) and `fseal measure --file x.jsonl` are all-or-nothing: if one row is invalid, nothing is written and the message names the rows. `--skip-existing` makes re-runs safe.
 - A re-run of a system on an item is a new system name (`v2-run2`); measurements are append-only. The scores come from whatever scorer you trust. `forecastseal` does not judge them; it keeps the comparison honest. `examples/prompt_versions_demo.py` shows the flow with synthetic scores.
+
+## If a study stops early
+
+Stopping early is fine; treating the numbers at that moment as a result is the risky part (see `examples/peeking_demo.py`). Record it:
+
+```bash
+fseal close --reason "ran out of time"      # stopped_early / completed / abandoned
+fseal report -o report.html
+```
+
+The ledger keeps the reason and the point it stopped at, refuses new data for a closed study, and the report says what the partial numbers can and cannot tell you. Looks planned in advance are a different matter: a sequential design (for example with a library such as evalsig) is the principled way to allow early stopping.
+
+## Using it from an AI agent
+
+[`docs/for-llm-agents.md`](docs/for-llm-agents.md) has a block you can paste into an agent's instructions so that it seals a plan, records its looks and reports how many variants it tried.
 
 ## Do you have enough data? (`fseal plan` and a one-page calculator)
 

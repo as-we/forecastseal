@@ -138,6 +138,17 @@ def _num(s, line, col):
         raise LedgerError(f"line {line}, column {col!r}: {s!r} is not a number") from e
 
 
+def cmd_close(args):
+    led = _ledger(args)
+    h = _protocol_hash(led, args)
+    e = led.close(h, args.reason, kind=args.kind)
+    b = e["body"]
+    print(f"closed: {b['kind']} at {b['n_complete']} of {b['n_target']} planned items. Reason on record: {b['reason']}")
+    if b["kind"] != "completed":
+        print("Numbers from a study that stopped early are partial. They can be exaggerated, especially if it stopped because they looked good; "
+              "treat them as hints, not a result. `fseal report` says so.")
+
+
 def cmd_resolve(args):
     _ledger(args).resolve(args.event, args.outcome)
     print(f"resolved {args.event} -> {args.outcome}")
@@ -368,6 +379,9 @@ def main(argv=None):
     s.add_argument("csv_file"); s.add_argument("--protocol"); s.add_argument("--wide", action="store_true", help="columns after item/system are metrics (blank cells skipped)")
     s.add_argument("--item-col", default="item"); s.add_argument("--system-col", default="system"); s.add_argument("--value-col", default="value"); s.add_argument("--metric-col", default="metric")
     s.add_argument("--skip-existing", action="store_true", help="ignore values that are already recorded (safe to re-run)")
+    s = add("close", cmd_close, "record that the study ended, and why (stopped early is a result too)")
+    s.add_argument("--reason", required=True, help="why it ended, in a sentence"); s.add_argument("--protocol")
+    s.add_argument("--kind", choices=["completed", "stopped_early", "abandoned"], help="default: completed if the planned size was reached, else stopped_early")
     s = add("resolve", cmd_resolve, "record the outcome of an event"); s.add_argument("event"); s.add_argument("outcome")
     s = add("verify", cmd_verify, "check the hash chain"); s.add_argument("--expected-head", help="a head hash you saved or timestamped earlier")
     s.add_argument("--manifest", help="re-check an item list against the sealed manifest and the recorded items")

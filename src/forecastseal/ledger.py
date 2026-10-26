@@ -32,6 +32,7 @@ PROTOCOL_REQUIRED = ("name", "n_target", "alpha")
 METRICS = ("log_loss", "brier")
 KINDS = ("forecast", "measure")
 DIRECTIONS = ("lower_is_better", "higher_is_better")
+CLOSURE_KINDS = ("completed", "stopped_early", "abandoned")
 MAX_TEXT = 256
 MAX_META_BYTES = 10_000
 MAX_LINE_BYTES = 1_000_000
@@ -257,6 +258,7 @@ class Ledger:
             raise LedgerError("unknown protocol hash; register the protocol before predicting")
         if protos[protocol_hash]["body"]["protocol"].get("kind", "forecast") != "forecast":
             raise LedgerError("this protocol is a measure protocol; use measure(), not predict()")
+        self._refuse_if_closed(protocol_hash)
         if not isinstance(probs, dict) or len(probs) < 2:
             raise LedgerError("probs needs at least two outcomes, e.g. {'yes': 0.7, 'no': 0.3}")
         for k, v in probs.items():
@@ -298,6 +300,7 @@ class Ledger:
         proto = protos[protocol_hash]["body"]["protocol"]
         if proto.get("kind", "forecast") != "measure":
             raise LedgerError("this protocol is a forecast protocol; use predict(), not measure()")
+        self._refuse_if_closed(protocol_hash)
         metric = self._metric_name(proto, metric)
         if not _is_number(value):
             raise LedgerError("value must be a finite number")
@@ -327,6 +330,8 @@ class Ledger:
             proto = protos[protocol_hash]["body"]["protocol"]
             if proto.get("kind", "forecast") != "measure":
                 raise LedgerError("this protocol is a forecast protocol; use predict(), not measure()")
+            if any(e["type"] == "closure" and e["body"]["protocol"] == protocol_hash for e in es):
+                raise LedgerError("this study is closed; start a new protocol (and say so) instead of adding to a closed one")
             multi = len(protocol_metrics(proto)) > 1
             seen = {(e["body"]["item"], e["body"]["system"], e["body"].get("metric")) for e in es
                     if e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash}
@@ -392,6 +397,45 @@ class Ledger:
             raise LedgerError(f"event {event!r} is already resolved")
         return self._append("outcome", {"event": event, "outcome": outcome}, now)
 
+    def closure(self, protocol_hash: str) -> dict | None:
+        """The closure entry of a protocol, if the study was closed."""
+        for e in self.entries():
+            if e["type"] == "closure" and e["body"]["protocol"] == protocol_hash:
+                return e
+        return None
+
+    def _refuse_if_closed(self, protocol_hash: str) -> None:
+        if self.closure(protocol_hash) is not None:
+            raise LedgerError("this study is closed; start a new protocol (and say so) instead of adding to a closed one")
+
+    def n_complete(self, protocol_hash: str) -> int:
+        """Items (measure protocols) or resolved events (forecast protocols) recorded so far."""
+        proto = self.protocols()[protocol_hash]["body"]["protocol"]
+        if proto.get("kind", "forecast") == "measure":
+            return len({e["body"]["item"] for e in self.entries() if e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash})
+        return len({r["event"] for r in self.resolved_items(protocol_hash)})
+
+    def close(self, protocol_hash: str, reason: str, kind: str | None = None, now: str | None = None) -> dict:
+        """Record that a study ended, and why. A study that stops early is a result too: it stays visible.
+
+        kind: completed | stopped_early | abandoned. Default: completed if the planned size was reached, else stopped_early.
+        New predictions and measurements are refused afterwards (outcomes of earlier predictions can still be resolved).
+        """
+        protos = self.protocols()
+        if protocol_hash not in protos:
+            raise LedgerError("unknown protocol hash")
+        reason = clean_text(reason, "reason")
+        self._refuse_if_closed(protocol_hash)
+        n = self.n_complete(protocol_hash)
+        target = protos[protocol_hash]["body"]["protocol"]["n_target"]
+        if kind is None:
+            kind = "completed" if n >= target else "stopped_early"
+        if kind not in CLOSURE_KINDS:
+            raise LedgerError(f"kind must be one of {CLOSURE_KINDS}")
+        if kind == "completed" and n < target:
+            raise LedgerError(f"only {n} of {target} planned items are complete; close it as stopped_early or abandoned")
+        return self._append("closure", {"protocol": protocol_hash, "kind": kind, "reason": reason, "n_complete": n, "n_target": target}, now)
+
     def log_analysis(self, protocol_hash: str, kind: str, what: str, n_resolved: int, metric: str | None = None, now: str | None = None) -> dict:
         """Every look at the results is recorded, so interim peeking stays visible."""
         if protocol_hash not in self.protocols():
@@ -449,6 +493,7 @@ class Ledger:
         hashes: set[str] = set()
         protocol_kinds: dict[str, str] = {}
         protocol_metric_names: dict[str, list[str]] = {}
+        closed: set[str] = set()
         measured: set[tuple] = set()
         for i, e in enumerate(self.entries(), 1):
             try:
@@ -474,6 +519,8 @@ class Ledger:
                     except Exception:
                         protocol_metric_names[e.get("hash")] = []
                 elif t == "prediction":
+                    if b.get("protocol") in closed:
+                        problems.append(f"entry {i}: prediction added after the study was closed")
                     if b.get("protocol") not in protos:
                         problems.append(f"entry {i}: prediction refers to an unregistered protocol")
                     elif protocol_kinds.get(b.get("protocol")) == "measure":
@@ -494,6 +541,8 @@ class Ledger:
                         problems.append(f"entry {i}: outcome is not a possible outcome of every prediction")
                     resolved.add(ev)
                 elif t == "measurement":
+                    if b.get("protocol") in closed:
+                        problems.append(f"entry {i}: measurement added after the study was closed")
                     pk = protocol_kinds.get(b.get("protocol"))
                     if pk is None:
                         problems.append(f"entry {i}: measurement refers to an unregistered protocol")
@@ -508,6 +557,14 @@ class Ledger:
                     measured.add(key)
                     if not _is_number(b.get("value")):
                         problems.append(f"entry {i}: measurement value is not a finite number")
+                elif t == "closure":
+                    if b.get("protocol") not in protos:
+                        problems.append(f"entry {i}: closure refers to an unregistered protocol")
+                    elif b.get("protocol") in closed:
+                        problems.append(f"entry {i}: study closed twice")
+                    if b.get("kind") not in CLOSURE_KINDS:
+                        problems.append(f"entry {i}: unknown closure kind {b.get('kind')!r}")
+                    closed.add(b.get("protocol"))
                 elif t == "analysis":
                     if b.get("protocol") not in protos:
                         problems.append(f"entry {i}: analysis refers to an unregistered protocol")
@@ -527,4 +584,5 @@ class Ledger:
         return {"entries": len(es), "protocols": len(self.protocols()), "predictions": len(ps), "events": len(events),
                 "resolved_events": len(done), "open_events": len(events - done),
                 "measurements": sum(1 for e in es if e["type"] == "measurement"),
+                "closed_studies": sum(1 for e in es if e["type"] == "closure"),
                 "analyses": sum(1 for e in es if e["type"] == "analysis"), "head": self.head()}

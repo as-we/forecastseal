@@ -189,6 +189,7 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
         systems.update(losses)
         items_done.update(r["event"] for r in led.items_for(protocol_hash, m["name"]))
     st = led.status()                      # after the comparisons above, so the analysis count includes them
+    closure = led.closure(protocol_hash)
     ok = not problems
     n_primary = sum(1 for m in metrics if m["primary"])
     metric_line = (f'{len(metrics)} metrics ({n_primary} primary)' if multi else f'metric: {esc(metrics[0]["name"])} ({esc(workflow.direction_text(metrics[0]["direction"]))})')
@@ -197,11 +198,24 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
                  f'<div class="card {"ok" if ok else "bad"}"><b>Ledger</b><span>{"intact" if ok else "BROKEN"}</span></div>'
                  f'<div class="card"><b>Progress</b><span>{len(items_done)} / {proto["n_target"]}</span><br><small class="muted">{"measured items" if is_measure else "resolved events"} / planned</small></div>'
                  f'<div class="card"><b>{"Systems" if is_measure else "Forecasters"}</b><span>{len(systems)}</span></div>'
-                 f'<div class="card"><b>Analyses logged</b><span>{st["analyses"]}</span></div></div>')
+                 f'<div class="card"><b>Analyses logged</b><span>{st["analyses"]}</span></div>'
+                 f'<div class="card"><b>Study</b><span>{esc(closure["body"]["kind"].replace("_", " ")) if closure else "open"}</span></div></div>')
     if not ok:
         parts.append('<div class="note"><b>The hash chain does not verify.</b> Do not trust the numbers below.<ul>' + "".join(f"<li>{esc(p)}</li>" for p in problems[:10]) + "</ul></div>")
     parts.append("</section>")
 
+    if closure and closure["body"]["kind"] != "completed":
+        cb = closure["body"]
+        shrink = ""
+        if 0 < cb["n_complete"] < cb["n_target"]:
+            shrink = f' At the planned size the intervals would be roughly {100 * (1 - (cb["n_complete"] / cb["n_target"]) ** 0.5):.0f}% narrower, if the spread stays similar.'
+        parts.append('<section><h2>This study ended early</h2><div class="note">'
+                     f'<p>{esc(cb["kind"].replace("_", " ").capitalize())} at {esc(cb["n_complete"])} of {esc(cb["n_target"])} planned items. Reason on record: <b>{esc(cb["reason"])}</b></p>'
+                     '<p><b>What the numbers can say:</b> the estimates and intervals so far. <b>What they cannot say:</b> that an effect is absent, or present at the planned precision. '
+                     'If the study stopped because the numbers looked good, estimates tend to be exaggerated (see <code>examples/peeking_demo.py</code>).' + esc(shrink) + '</p>'
+                     '<p>Treat the figures below as hints, not as a result.</p></div></section>')
+    elif closure:
+        parts.append(f'<section><h2>Study closed</h2><p class="muted">Completed at {esc(closure["body"]["n_complete"])} of {esc(closure["body"]["n_target"])} planned items. Reason on record: {esc(closure["body"]["reason"])}</p></section>')
     plan_rows = (f'<tr><th>Name</th><td>{esc(proto["name"])}</td></tr>'
                  + (f'<tr><th>Metrics</th><td>' + "<br>".join(f'{esc(m["name"])} · {"primary" if m["primary"] else "exploratory"} · {esc(workflow.direction_text(m["direction"]))}' for m in metrics) + "</td></tr>" if multi
                     else f'<tr><th>Metric</th><td>{esc(metrics[0]["name"])}</td></tr>')

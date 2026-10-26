@@ -2,8 +2,8 @@
 
 Seal your analysis plan before the outcome is known, append forecasts to a tamper-evident ledger, then score and test them honestly.
 
-> **Status: pre-alpha (v0.0.3).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
-> Planned: continuous-valued metrics, optional OpenTimestamps anchoring.
+> **Status: pre-alpha (v0.0.4).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
+> Also working: continuous-valued measurements for comparing versions of a system on the same items. Planned: optional OpenTimestamps anchoring.
 
 ## Why
 
@@ -45,6 +45,25 @@ fseal report -o report.html --compare A B   # one HTML file: scores, calibration
 A runnable synthetic example (no real-world data) is in `examples/synthetic_demo.py`; it also writes `demo_report.html`.
 
 The report is a single HTML file with no scripts and no external requests (a strict Content-Security-Policy is embedded; every string from the ledger is escaped). If the hash chain does not verify, the report says so at the top. Asking for a comparison in the report follows the same rules as `fseal test` (refused before `n_target` unless `--interim`; every look is logged).
+
+## Comparing versions of a system (measured values)
+
+Not everything is a probability forecast. To compare two prompts, two models or two settings on the same items, seal a protocol of kind `measure`, record one score per system and item, and compare them with the same rules (paired items, intervals, sample size fixed in advance, looks logged):
+
+```bash
+cat > protocol.json <<'JSON'
+{"name": "prompt-versions", "kind": "measure", "metric": "quality score",
+ "direction": "higher_is_better", "n_target": 40, "alpha": 0.05}
+JSON
+fseal init && fseal register protocol.json
+fseal measure --item doc-01 --system v1 --value 0.62
+fseal measure --item doc-01 --system v2 --value 0.71      # or --file scores.jsonl
+fseal score                       # mean per system
+fseal test v2 v1                  # positive favours v2 because higher is better
+fseal report -o report.html --compare v2 v1
+```
+
+A re-run of a system on an item is a new system name (`v2-run2`): measurements are append-only. `examples/prompt_versions_demo.py` shows the whole flow with synthetic scores. The scores themselves come from whatever scorer you trust; `forecastseal` does not judge them, it keeps the comparison honest.
 
 ## Reading the statistics honestly
 - Intervals are percentile bootstrap intervals over events. With fewer than a few hundred events they can be too narrow ([Position: Don't Use the CLT in LLM Evals With Fewer Than a Few Hundred Datapoints](https://arxiv.org/pdf/2503.01747)); `test` warns below 30 events.

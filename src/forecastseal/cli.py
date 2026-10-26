@@ -62,6 +62,24 @@ def cmd_predict(args):
         print(f"appended prediction {args.id}")
 
 
+def cmd_measure(args):
+    led = _ledger(args)
+    if args.file:
+        n = 0
+        h = _protocol_hash(led, args)
+        for line in Path(args.file).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r = loads(line)
+                led.measure(r["item"], r["system"], r["value"], h, meta=r.get("meta"))
+                n += 1
+        print(f"appended {n} measurements")
+    else:
+        if not (args.item and args.system and args.value is not None):
+            raise LedgerError("give --item, --system and --value, or --file")
+        led.measure(args.item, args.system, args.value, _protocol_hash(led, args))
+        print(f"recorded {args.system} on {args.item}: {args.value}")
+
+
 def cmd_resolve(args):
     _ledger(args).resolve(args.event, args.outcome)
     print(f"resolved {args.event} -> {args.outcome}")
@@ -90,18 +108,22 @@ def cmd_head(args):
 def cmd_score(args):
     led = _ledger(args)
     h = _protocol_hash(led, args)
-    metric = _proto(led, h)["metric"]
-    res = stats.score(led.resolved_items(h), metric)
-    print(f"metric: {metric} (lower is better)")
-    for name, r in sorted(res.items(), key=lambda kv: kv[1]["mean"]):
+    proto = _proto(led, h)
+    res = stats.score(led.items_for(h), proto["metric"])
+    print(f"metric: {proto['metric']} ({workflow.direction_text(proto)})")
+    hib = proto.get("direction") == "higher_is_better"
+    for name, r in sorted(res.items(), key=lambda kv: -kv[1]["mean"] if hib else kv[1]["mean"]):
         print(f"  {name:24s} n={r['n']:<5d} mean={r['mean']:.4f}")
 
 
 def cmd_calibration(args):
     led = _ledger(args)
     h = _protocol_hash(led, args)
-    rows = [r for r in led.resolved_items(h) if not args.forecaster or r["forecaster"] == args.forecaster]
-    cal = stats.calibration(rows)
+    rows = [r for r in led.items_for(h) if not args.forecaster or r["forecaster"] == args.forecaster]
+    try:
+        cal = stats.calibration(rows)
+    except ValueError as e:
+        raise LedgerError(str(e)) from e
     print(f"pairs: {cal['n']}   ECE: {cal['ece']:.4f}   (bins with few pairs are noise)")
     print("  bin          n   mean_pred   observed")
     for b in cal["bins"]:
@@ -113,7 +135,8 @@ def cmd_test(args):
     h = _protocol_hash(led, args)
     res = workflow.compare_logged(led, h, args.a, args.b, interim=args.interim, seed=args.seed)
     lo, hi = res["ci"]
-    print(f"{args.a} vs {args.b}  ({res['metric']}, difference = {args.a} minus {args.b}; negative favours {args.a})")
+    sign = f"positive favours {args.a}" if res["higher_is_better"] else f"negative favours {args.a}"
+    print(f"{args.a} vs {args.b}  ({res['metric']}, difference = {args.a} minus {args.b}; {sign})")
     print(f"  paired events: {res['n']}   mean difference: {res['mean_diff']:+.4f}   sd: {res['sd']:.4f}")
     print(f"  {100 * (1 - res['alpha_adj']):.2f}% interval (alpha {res['alpha']} / {res['planned']} planned comparisons): [{lo:+.4f}, {hi:+.4f}]")
     if res["n"] < 30:
@@ -121,7 +144,7 @@ def cmd_test(args):
     if not res["final"]:
         print("  INTERIM LOOK, not a verdict. This look is recorded in the ledger.")
     else:
-        print("  verdict:", "interval excludes 0" if res["excludes_zero"] else "interval includes 0: no difference shown")
+        print("  verdict:", f"interval excludes 0; {res['better']} is better" if res["excludes_zero"] else "interval includes 0: no difference shown")
         if res["prior_final"] >= res["planned"]:
             print(f"  warning: this is final analysis #{res['prior_final'] + 1}, but the protocol planned {res['planned']} comparison(s). Treat the interval as too narrow.")
 
@@ -142,7 +165,7 @@ def cmd_power(args):
         led = _ledger(args)
         h = _protocol_hash(led, args)
         a, b = args.from_ledger
-        d = stats.paired_diffs(led.resolved_items(h), _proto(led, h)["metric"], a, b)
+        d = stats.paired_diffs(led.items_for(h), _proto(led, h)["metric"], a, b)
         if len(d) < 2:
             raise LedgerError("need at least two paired events to estimate the spread")
         sd = stats.stdev(d)
@@ -177,6 +200,9 @@ def main(argv=None):
     s = add("predict", cmd_predict, "append a prediction (or --file JSONL)")
     s.add_argument("--file"); s.add_argument("--id"); s.add_argument("--event"); s.add_argument("--protocol")
     s.add_argument("--forecaster", default="anon"); s.add_argument("--probs", help='JSON, e.g. \'{"yes":0.7,"no":0.3}\'')
+    s = add("measure", cmd_measure, "record a score of a system on an item (measure protocols)")
+    s.add_argument("--file", help='JSONL lines like {"item": "doc-1", "system": "v2", "value": 0.83}')
+    s.add_argument("--item"); s.add_argument("--system"); s.add_argument("--value", type=float); s.add_argument("--protocol")
     s = add("resolve", cmd_resolve, "record the outcome of an event"); s.add_argument("event"); s.add_argument("outcome")
     s = add("verify", cmd_verify, "check the hash chain"); s.add_argument("--expected-head", help="a head hash you saved or timestamped earlier")
     add("status", cmd_status, "counts and head hash")

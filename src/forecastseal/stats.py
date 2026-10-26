@@ -26,15 +26,18 @@ def brier(probs: dict, outcome: str) -> float:
 LOSSES = {"log_loss": log_loss, "brier": brier}
 
 
+def _loss(r: dict, metric: str) -> float:
+    """Per-row value: a measured value as is, or the loss of a probability forecast."""
+    return r["value"] if "value" in r else LOSSES[metric](r["probs"], r["outcome"])
+
+
 def _by_forecaster(rows: list[dict], metric: str) -> dict[str, dict[str, float]]:
-    f = LOSSES[metric]
     out: dict[str, dict[str, float]] = {}
     for r in rows:
         d = out.setdefault(r["forecaster"], {})
         if r["event"] in d:
-            raise ValueError(f"forecaster {r['forecaster']!r} has two predictions for event {r['event']!r}; "
-                             "use one prediction per forecaster and event")
-        d[r["event"]] = f(r["probs"], r["outcome"])
+            raise ValueError(f"{r['forecaster']!r} has two entries for {r['event']!r}; use one per forecaster and event")
+        d[r["event"]] = _loss(r, metric)
     return out
 
 
@@ -71,16 +74,26 @@ def bootstrap_ci(values: list[float], level: float, n_boot: int = 2000, seed: in
     return (lo, hi)
 
 
-def compare(rows: list[dict], metric: str, a: str, b: str, alpha: float, n_comparisons: int = 1, seed: int = 43, n_boot: int = 2000) -> dict:
+def compare(rows: list[dict], metric: str, a: str, b: str, alpha: float, n_comparisons: int = 1, seed: int = 43,
+            n_boot: int = 2000, higher_is_better: bool = False) -> dict:
+    """Difference is always a minus b. ``better`` says which one the sign favours (None if the interval includes 0)."""
     d = paired_diffs(rows, metric, a, b)
     alpha_adj = alpha / n_comparisons
     lo, hi = bootstrap_ci(d, 1 - alpha_adj, n_boot, seed)
-    return {"n": len(d), "mean_diff": mean(d) if d else float("nan"), "sd": stdev(d) if len(d) > 1 else float("nan"),
-            "alpha_adj": alpha_adj, "ci": (lo, hi), "excludes_zero": (lo > 0 or hi < 0) if len(d) > 1 else False}
+    excl = (lo > 0 or hi < 0) if len(d) > 1 else False
+    m = mean(d) if d else float("nan")
+    better = None
+    if excl:
+        a_wins = (m > 0) if higher_is_better else (m < 0)
+        better = a if a_wins else b
+    return {"n": len(d), "mean_diff": m, "sd": stdev(d) if len(d) > 1 else float("nan"), "alpha_adj": alpha_adj,
+            "ci": (lo, hi), "excludes_zero": excl, "better": better, "higher_is_better": higher_is_better}
 
 
 def calibration(rows: list[dict], bins: int = 10) -> dict:
     """Reliability over every (event, outcome label) pair; ECE is the count-weighted mean gap."""
+    if any("value" in r for r in rows):
+        raise ValueError("calibration applies to probability forecasts, not measured values")
     pairs = [(p, 1.0 if k == r["outcome"] else 0.0) for r in rows for k, p in r["probs"].items()]
     out = []
     ece = 0.0

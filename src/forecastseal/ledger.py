@@ -30,6 +30,8 @@ LEDGER_FILE = "ledger.jsonl"
 LOCK_FILE = ".lock"
 PROTOCOL_REQUIRED = ("name", "metric", "n_target", "alpha")
 METRICS = ("log_loss", "brier")
+KINDS = ("forecast", "measure")
+DIRECTIONS = ("lower_is_better", "higher_is_better")
 MAX_TEXT = 256
 MAX_META_BYTES = 10_000
 MAX_LINE_BYTES = 1_000_000
@@ -160,8 +162,16 @@ class Ledger:
         if missing:
             raise LedgerError(f"protocol is missing: {', '.join(missing)}")
         clean_text(protocol["name"], "protocol name")
-        if protocol["metric"] not in METRICS:
-            raise LedgerError(f"metric must be one of {METRICS}")
+        kind = protocol.get("kind", "forecast")
+        if kind not in KINDS:
+            raise LedgerError(f"kind must be one of {KINDS}")
+        if kind == "forecast":
+            if protocol["metric"] not in METRICS:
+                raise LedgerError(f"metric must be one of {METRICS}")
+        else:  # measure: a free-text metric label and an explicit direction
+            clean_text(protocol["metric"], "metric")
+            if protocol.get("direction") not in DIRECTIONS:
+                raise LedgerError(f"a measure protocol needs direction: one of {DIRECTIONS}")
         n = protocol["n_target"]
         if not (isinstance(n, int) and not isinstance(n, bool) and n > 0):
             raise LedgerError("n_target must be a positive integer")
@@ -185,8 +195,11 @@ class Ledger:
         pid = clean_text(pid, "prediction id")
         forecaster = clean_text(forecaster, "forecaster")
         event = clean_text(event if event is not None else pid, "event")
-        if protocol_hash not in self.protocols():
+        protos = self.protocols()
+        if protocol_hash not in protos:
             raise LedgerError("unknown protocol hash; register the protocol before predicting")
+        if protos[protocol_hash]["body"]["protocol"].get("kind", "forecast") != "forecast":
+            raise LedgerError("this protocol is a measure protocol; use measure(), not predict()")
         if not isinstance(probs, dict) or len(probs) < 2:
             raise LedgerError("probs needs at least two outcomes, e.g. {'yes': 0.7, 'no': 0.3}")
         for k, v in probs.items():
@@ -206,6 +219,37 @@ class Ledger:
                 raise LedgerError("meta must be a small JSON object")
             body["meta"] = meta
         return self._append("prediction", body, now)
+
+    def measure(self, item: str, system: str, value: float, protocol_hash: str, meta: dict | None = None, now: str | None = None) -> dict:
+        """Record one score of one system on one item (for protocols of kind 'measure')."""
+        item = clean_text(item, "item")
+        system = clean_text(system, "system")
+        protos = self.protocols()
+        if protocol_hash not in protos:
+            raise LedgerError("unknown protocol hash; register the protocol before measuring")
+        if protos[protocol_hash]["body"]["protocol"].get("kind", "forecast") != "measure":
+            raise LedgerError("this protocol is a forecast protocol; use predict(), not measure()")
+        if not _is_number(value):
+            raise LedgerError("value must be a finite number")
+        if any(e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash and e["body"]["item"] == item and e["body"]["system"] == system
+               for e in self.entries()):
+            raise LedgerError(f"{system!r} already has a value for item {item!r} (append-only; give a re-run a new system name)")
+        body = {"id": f"{system}::{item}", "item": item, "system": system, "protocol": protocol_hash, "value": value}
+        if meta is not None:
+            if not isinstance(meta, dict) or len(canonical(meta)) > MAX_META_BYTES:
+                raise LedgerError("meta must be a small JSON object")
+            body["meta"] = meta
+        return self._append("measurement", body, now)
+
+    def measured_items(self, protocol_hash: str) -> list[dict]:
+        """One row per measurement under a protocol, shaped like resolved_items() rows."""
+        return [{"id": e["body"]["id"], "event": e["body"]["item"], "forecaster": e["body"]["system"], "value": e["body"]["value"]}
+                for e in self.entries() if e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash]
+
+    def items_for(self, protocol_hash: str) -> list[dict]:
+        """Rows used for scoring, whichever kind the protocol is."""
+        kind = self.protocols()[protocol_hash]["body"]["protocol"].get("kind", "forecast")
+        return self.measured_items(protocol_hash) if kind == "measure" else self.resolved_items(protocol_hash)
 
     def resolve(self, event: str, outcome: str, now: str | None = None) -> dict:
         event = clean_text(event, "event")
@@ -252,6 +296,8 @@ class Ledger:
         pred_events: dict[str, list[dict]] = {}
         resolved: set[str] = set()
         hashes: set[str] = set()
+        protocol_kinds: dict[str, str] = {}
+        measured: set[tuple] = set()
         for i, e in enumerate(self.entries(), 1):
             try:
                 if e.get("seq") != i:
@@ -270,9 +316,12 @@ class Ledger:
                 t, b = e.get("type"), e.get("body") or {}
                 if t == "protocol":
                     protos.add(e.get("hash"))
+                    protocol_kinds[e.get("hash")] = (b.get("protocol") or {}).get("kind", "forecast")
                 elif t == "prediction":
                     if b.get("protocol") not in protos:
                         problems.append(f"entry {i}: prediction refers to an unregistered protocol")
+                    elif protocol_kinds.get(b.get("protocol")) == "measure":
+                        problems.append(f"entry {i}: prediction under a measure protocol")
                     if b.get("id") in pred_ids:
                         problems.append(f"entry {i}: duplicate prediction id {b.get('id')!r}")
                     if b.get("event") in resolved:
@@ -288,6 +337,18 @@ class Ledger:
                     elif any(b.get("outcome") not in p.get("probs", {}) for p in pred_events[ev]):
                         problems.append(f"entry {i}: outcome is not a possible outcome of every prediction")
                     resolved.add(ev)
+                elif t == "measurement":
+                    pk = protocol_kinds.get(b.get("protocol"))
+                    if pk is None:
+                        problems.append(f"entry {i}: measurement refers to an unregistered protocol")
+                    elif pk != "measure":
+                        problems.append(f"entry {i}: measurement under a forecast protocol")
+                    key = (b.get("protocol"), b.get("item"), b.get("system"))
+                    if key in measured:
+                        problems.append(f"entry {i}: duplicate measurement for {b.get('system')!r} on {b.get('item')!r}")
+                    measured.add(key)
+                    if not _is_number(b.get("value")):
+                        problems.append(f"entry {i}: measurement value is not a finite number")
                 elif t == "analysis":
                     if b.get("protocol") not in protos:
                         problems.append(f"entry {i}: analysis refers to an unregistered protocol")
@@ -306,4 +367,5 @@ class Ledger:
         done = {e["body"]["event"] for e in es if e["type"] == "outcome"}
         return {"entries": len(es), "protocols": len(self.protocols()), "predictions": len(ps), "events": len(events),
                 "resolved_events": len(done), "open_events": len(events - done),
+                "measurements": sum(1 for e in es if e["type"] == "measurement"),
                 "analyses": sum(1 for e in es if e["type"] == "analysis"), "head": self.head()}

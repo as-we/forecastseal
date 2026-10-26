@@ -46,23 +46,30 @@ def _short(s: str, n: int = 26) -> str:
 
 
 def _score_chart(items: list[tuple[str, float, float, float]]) -> str:
-    """items: (name, mean, lo, hi)."""
-    top = max(hi for _, _, _, hi in items) * 1.08 or 1.0
+    """items: (name, mean, lo, hi). The axis always includes 0 and may extend below it."""
+    amin = min(0.0, min(lo for _, _, lo, _ in items))
+    amax = max(0.0, max(hi for _, _, _, hi in items))
+    span = (amax - amin) or 1.0
+    amin -= span * 0.04 if amin < 0 else 0.0
+    amax += span * 0.04
     w, lab, pad = 560, 150, 14
     h = 26 * len(items) + 34
-    x = lambda v: lab + (v / top) * (w - lab - pad)
-    out = [f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="Mean loss per forecaster with 95% bootstrap intervals">']
+    x = lambda v: lab + ((v - amin) / (amax - amin)) * (w - lab - pad)
+    out = [f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="Mean value per forecaster or system with 95% bootstrap intervals">']
     for i, (name, m, lo, hi) in enumerate(items):
         y = 10 + i * 26
+        bx = min(x(0), x(m))
         out.append(f'<text x="{lab - 8}" y="{y + 12}" font-size="12" text-anchor="end">{esc(_short(name))}</text>')
-        out.append(f'<rect x="{lab}" y="{y}" width="{max(1.0, x(m) - lab):.1f}" height="16" fill="var(--accent)" opacity="0.8"/>')
+        out.append(f'<rect x="{bx:.1f}" y="{y}" width="{max(1.0, abs(x(m) - x(0))):.1f}" height="16" fill="var(--accent)" opacity="0.8"/>')
         out.append(f'<line x1="{x(lo):.1f}" y1="{y + 8}" x2="{x(hi):.1f}" y2="{y + 8}" stroke="currentColor" stroke-width="1.5"/>')
         out.append(f'<line x1="{x(lo):.1f}" y1="{y + 3}" x2="{x(lo):.1f}" y2="{y + 13}" stroke="currentColor" stroke-width="1.5"/>')
         out.append(f'<line x1="{x(hi):.1f}" y1="{y + 3}" x2="{x(hi):.1f}" y2="{y + 13}" stroke="currentColor" stroke-width="1.5"/>')
     base = 10 + len(items) * 26 + 6
-    out.append(f'<line x1="{lab}" y1="4" x2="{lab}" y2="{base - 4}" stroke="currentColor" opacity="0.4"/>')
-    out.append(f'<text x="{lab}" y="{base + 12}" font-size="11" text-anchor="middle">0</text>')
-    out.append(f'<text x="{w - pad}" y="{base + 12}" font-size="11" text-anchor="end">{top:.3f}</text>')
+    out.append(f'<line x1="{x(0):.1f}" y1="4" x2="{x(0):.1f}" y2="{base - 4}" stroke="currentColor" opacity="0.4"/>')
+    out.append(f'<text x="{x(0):.1f}" y="{base + 12}" font-size="11" text-anchor="middle">0</text>')
+    out.append(f'<text x="{w - pad}" y="{base + 12}" font-size="11" text-anchor="end">{amax:.3f}</text>')
+    if amin < 0:
+        out.append(f'<text x="{lab}" y="{base + 12}" font-size="11" text-anchor="start">{amin:.3f}</text>')
     out.append("</svg>")
     return "".join(out)
 
@@ -85,6 +92,7 @@ def _calibration_chart(name: str, cal: dict) -> str:
 
 def _interval_chart(res: dict) -> str:
     lo, hi, m = res["ci"][0], res["ci"][1], res["mean_diff"]
+    left, right = (res["b"], res["a"]) if res.get("higher_is_better") else (res["a"], res["b"])   # negative side, positive side
     span = max(abs(lo), abs(hi), abs(m)) * 1.35 or 1.0
     w = 560
     x = lambda v: w / 2 + v / span * (w / 2 - 20)
@@ -92,8 +100,8 @@ def _interval_chart(res: dict) -> str:
             f'<line x1="{w / 2}" y1="6" x2="{w / 2}" y2="40" stroke="currentColor" opacity="0.5"/>'
             f'<line x1="{x(lo):.1f}" y1="23" x2="{x(hi):.1f}" y2="23" stroke="currentColor" stroke-width="2"/>'
             f'<circle cx="{x(m):.1f}" cy="23" r="5" fill="var(--accent)"/>'
-            f'<text x="20" y="62" font-size="11">← favours {esc(_short(res["a"], 14))}</text>'
-            f'<text x="{w - 20}" y="62" font-size="11" text-anchor="end">favours {esc(_short(res["b"], 14))} →</text></svg>')
+            f'<text x="20" y="62" font-size="11">← favours {esc(_short(left, 14))}</text>'
+            f'<text x="{w - 20}" y="62" font-size="11" text-anchor="end">favours {esc(_short(right, 14))} →</text></svg>')
 
 
 def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str, str]] | None = None,
@@ -105,8 +113,11 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
             raise workflow.LedgerError("several protocols are registered; pass --protocol <hash>")
         protocol_hash = next(iter(protos))
     proto = workflow.protocol_of(led, protocol_hash)
-    rows = led.resolved_items(protocol_hash)
+    rows = led.items_for(protocol_hash)
     metric = proto["metric"]
+    is_measure = proto.get("kind", "forecast") == "measure"
+    hib = proto.get("direction") == "higher_is_better"
+    unit = "Items" if is_measure else "Events"
     losses = stats.loss_lists(rows, metric) if rows else {}
     n_done = len({r["event"] for r in rows})
     comps = [workflow.compare_logged(led, protocol_hash, a, b, interim=interim, seed=seed) for a, b in (compare or [])]
@@ -115,10 +126,10 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
 
     parts: list[str] = []
     ok = not problems
-    parts.append(f'<header><h1>{esc(proto["name"])}</h1><p class="muted">forecastseal report · metric: {esc(metric)} (lower is better) · generated {esc(gen)}</p></header>')
+    parts.append(f'<header><h1>{esc(proto["name"])}</h1><p class="muted">forecastseal report · metric: {esc(metric)} ({esc(workflow.direction_text(proto))}) · generated {esc(gen)}</p></header>')
     parts.append('<section><div class="cards">'
                  f'<div class="card {"ok" if ok else "bad"}"><b>Ledger</b><span>{"intact" if ok else "BROKEN"}</span></div>'
-                 f'<div class="card"><b>Progress</b><span>{n_done} / {proto["n_target"]}</span><br><small class="muted">resolved events / planned</small></div>'
+                 f'<div class="card"><b>Progress</b><span>{n_done} / {proto["n_target"]}</span><br><small class="muted">{"measured items" if is_measure else "resolved events"} / planned</small></div>'
                  f'<div class="card"><b>Forecasters</b><span>{len(losses)}</span></div>'
                  f'<div class="card"><b>Analyses logged</b><span>{st["analyses"]}</span></div></div>')
     if not ok:
@@ -127,25 +138,26 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
 
     parts.append('<section><h2>Sealed protocol</h2><div class="scroll"><table><tbody>'
                  f'<tr><th>Name</th><td>{esc(proto["name"])}</td></tr><tr><th>Metric</th><td>{esc(metric)}</td></tr>'
-                 f'<tr><th>Planned events</th><td>{esc(proto["n_target"])}</td></tr><tr><th>Alpha</th><td>{esc(proto["alpha"])}</td></tr>'
+                 f'<tr><th>Planned {unit.lower()}</th><td>{esc(proto["n_target"])}</td></tr><tr><th>Alpha</th><td>{esc(proto["alpha"])}</td></tr>'
                  f'<tr><th>Planned comparisons</th><td>{esc(proto.get("n_comparisons", 1))}</td></tr>'
                  f'<tr><th>Protocol hash</th><td class="mono">{esc(protocol_hash)}</td></tr></tbody></table></div></section>')
 
     if losses:
         items = []
-        table = ['<div class="scroll"><table><thead><tr><th>Forecaster</th><th class="n">Events</th><th class="n">Mean loss</th><th class="n">95% interval</th></tr></thead><tbody>']
-        for name, v in sorted(losses.items(), key=lambda kv: sum(kv[1]) / len(kv[1])):
+        table = [f'<div class="scroll"><table><thead><tr><th>Forecaster</th><th class="n">{unit}</th><th class="n">{"Mean value" if is_measure else "Mean loss"}</th><th class="n">95% interval</th></tr></thead><tbody>']
+        for name, v in sorted(losses.items(), key=lambda kv: (-1 if hib else 1) * sum(kv[1]) / len(kv[1])):
             m = sum(v) / len(v)
             lo, hi = stats.bootstrap_ci(v, 0.95, seed=seed) if len(v) > 1 else (m, m)
             items.append((name, m, lo, hi))
             table.append(f'<tr><td>{esc(name)}</td><td class="n">{len(v)}</td><td class="n">{_f(m)}</td><td class="n">[{_f(lo)}, {_f(hi)}]</td></tr>')
         table.append("</tbody></table></div>")
-        parts.append('<section><h2>Scores</h2>' + "".join(table) + f'<figure>{_score_chart(items)}<figcaption>Bars show mean loss; whiskers show a 95% bootstrap interval for each forecaster alone. Overlapping whiskers do not decide a comparison: use the paired comparison below.</figcaption></figure></section>')
+        parts.append('<section><h2>Scores</h2>' + "".join(table) + f'<figure>{_score_chart(items)}<figcaption>Bars show the mean; whiskers show a 95% bootstrap interval for each forecaster alone. Overlapping whiskers do not decide a comparison: use the paired comparison below.</figcaption></figure></section>')
         cal_figs = []
-        for name in sorted(losses):
+        for name in ([] if is_measure else sorted(losses)):
             cal = stats.calibration([r for r in rows if r["forecaster"] == name])
             cal_figs.append(f'<figure>{_calibration_chart(name, cal)}<figcaption>{esc(_short(name, 30))} · ECE {_f(cal["ece"])} · {cal["n"]} pairs</figcaption></figure>')
-        parts.append('<section><h2>Calibration</h2><div class="grid">' + "".join(cal_figs) + '</div><p class="muted">Points on the dashed diagonal mean "said 70%, happened 70% of the time". Point size shows how many forecasts fall in the bin; small points are noise.</p></section>')
+        if not is_measure:
+          parts.append('<section><h2>Calibration</h2><div class="grid">' + "".join(cal_figs) + '</div><p class="muted">Points on the dashed diagonal mean "said 70%, happened 70% of the time". Point size shows how many forecasts fall in the bin; small points are noise.</p></section>')
     else:
         parts.append('<section><h2>Scores</h2><p class="muted">No resolved events yet.</p></section>')
 
@@ -153,14 +165,14 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
         blocks = []
         for r in comps:
             tag = ("final analysis" if r["final"] else "INTERIM LOOK, not a verdict")
-            verdict = ("interval excludes 0" if r["excludes_zero"] else "interval includes 0: no difference shown") if r["final"] else "no verdict before the planned number of events"
+            verdict = (f'interval excludes 0; {r["better"]} is better' if r["excludes_zero"] else "interval includes 0: no difference shown") if r["final"] else "no verdict before the planned number of events"
             extra = ""
             if r["final"] and r["prior_final"] >= r["planned"]:
                 extra = f'<div class="note">This is final analysis #{r["prior_final"] + 1}, but the protocol planned {r["planned"]} comparison(s). Treat the interval as too narrow.</div>'
             if r["n"] < 30:
                 extra += '<div class="note">Fewer than 30 paired events: intervals are unreliable at this size.</div>'
             blocks.append(f'<figure><p><b>{esc(r["a"])} vs {esc(r["b"])}</b> · {esc(tag)}</p>{_interval_chart(r)}'
-                          f'<figcaption>difference = {esc(r["a"])} minus {esc(r["b"])} · mean {r["mean_diff"]:+.4f} · {100 * (1 - r["alpha_adj"]):.2f}% interval [{r["ci"][0]:+.4f}, {r["ci"][1]:+.4f}] · {r["n"]} paired events · {esc(verdict)}</figcaption>{extra}</figure>')
+                          f'<figcaption>difference = {esc(r["a"])} minus {esc(r["b"])} ({"positive" if r["higher_is_better"] else "negative"} favours {esc(r["a"])}) · mean {r["mean_diff"]:+.4f} · {100 * (1 - r["alpha_adj"]):.2f}% interval [{r["ci"][0]:+.4f}, {r["ci"][1]:+.4f}] · {r["n"]} paired events · {esc(verdict)}</figcaption>{extra}</figure>')
         parts.append("<section><h2>Paired comparisons</h2>" + "".join(blocks) + "</section>")
     else:
         parts.append('<section><h2>Paired comparisons</h2><p class="muted">None requested. Add <code>--compare A B</code> when the planned number of events is resolved (or <code>--interim</code> for a logged, non-final look).</p></section>')

@@ -5,29 +5,51 @@ earlier entry breaks every later hash and is found by ``Ledger.verify()``.
 
 Limits (also stated in the README): the timestamps come from the local clock. The chain
 proves the ledger was not edited *after* you publish or anchor its head hash somewhere
-outside your control (a Git push, a timestamp service). It does not prove when it was written.
+outside your control (a Git push, a timestamp service). Deleting the *last* entries is only
+detectable if you saved an earlier head hash: ``verify(expected_head=...)``.
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
 import math
+import os
+import time
+import unicodedata
 from pathlib import Path
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 GENESIS = "0" * 64
 LEDGER_FILE = "ledger.jsonl"
+LOCK_FILE = ".lock"
 PROTOCOL_REQUIRED = ("name", "metric", "n_target", "alpha")
 METRICS = ("log_loss", "brier")
+MAX_TEXT = 256
+MAX_META_BYTES = 10_000
+MAX_LINE_BYTES = 1_000_000
 
 
 class LedgerError(Exception):
     """Raised for invalid input or a broken ledger."""
 
 
+def _reject_constant(name):  # NaN / Infinity are not valid JSON; refuse them everywhere
+    raise ValueError(f"non-finite number {name} is not allowed")
+
+
+def loads(s: str):
+    return json.loads(s, parse_constant=_reject_constant)
+
+
 def canonical(obj) -> bytes:
-    """Deterministic JSON bytes used for hashing."""
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    """Deterministic JSON bytes used for hashing (NaN/Infinity are refused)."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
 def entry_hash(seq: int, etype: str, ts: str, prev: str, body: dict) -> str:
@@ -38,12 +60,54 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def clean_text(value, what: str) -> str:
+    """Names and ids go to terminals and reports: no control characters, bounded length."""
+    if not isinstance(value, str) or not value.strip():
+        raise LedgerError(f"{what} must be a non-empty string")
+    if len(value) > MAX_TEXT:
+        raise LedgerError(f"{what} is longer than {MAX_TEXT} characters")
+    if any(unicodedata.category(c).startswith("C") for c in value):
+        raise LedgerError(f"{what} contains control characters")
+    return value
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 class Ledger:
     def __init__(self, root: str | Path = ".fseal"):
         self.root = Path(root)
         self.path = self.root / LEDGER_FILE
 
     # ---------- storage ----------
+    @contextlib.contextmanager
+    def _lock(self):
+        """Exclusive lock so two writers cannot fork the chain."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        lock_path = self.root / LOCK_FILE
+        if fcntl is not None:
+            with open(lock_path, "a") as fh:
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+        else:  # pragma: no cover - portable fallback
+            for _ in range(200):
+                try:
+                    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    break
+                except FileExistsError:
+                    time.sleep(0.05)
+            else:
+                raise LedgerError("could not obtain the ledger lock")
+            try:
+                yield
+            finally:
+                os.close(fd)
+                os.unlink(lock_path)
+
     def init(self) -> None:
         if self.path.exists():
             raise LedgerError(f"{self.path} already exists")
@@ -54,14 +118,20 @@ class Ledger:
         if not self.path.exists():
             raise LedgerError(f"no ledger at {self.path}; run `fseal init` first")
         out = []
-        with self.path.open(encoding="utf-8") as fh:
-            for n, line in enumerate(fh, 1):
-                line = line.strip()
-                if line:
-                    try:
-                        out.append(json.loads(line))
-                    except json.JSONDecodeError as e:
-                        raise LedgerError(f"line {n}: not valid JSON ({e})") from e
+        with self.path.open("rb") as fh:
+            for n, raw in enumerate(fh, 1):
+                if len(raw) > MAX_LINE_BYTES:
+                    raise LedgerError(f"line {n}: longer than {MAX_LINE_BYTES} bytes")
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    e = loads(line)
+                except ValueError as ex:
+                    raise LedgerError(f"line {n}: not valid JSON ({ex})") from ex
+                if not isinstance(e, dict):
+                    raise LedgerError(f"line {n}: entry is not an object")
+                out.append(e)
         return out
 
     def head(self) -> str:
@@ -69,101 +139,171 @@ class Ledger:
         return es[-1]["hash"] if es else GENESIS
 
     def _append(self, etype: str, body: dict, now: str | None = None) -> dict:
-        es = self.entries()
-        seq = len(es) + 1
-        prev = es[-1]["hash"] if es else GENESIS
-        ts = now or _now()
-        e = {"seq": seq, "type": etype, "ts": ts, "prev": prev, "body": body, "hash": entry_hash(seq, etype, ts, prev, body)}
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(e, sort_keys=True, ensure_ascii=False) + "\n")
+        with self._lock():
+            es = self.entries()
+            seq = len(es) + 1
+            prev = es[-1]["hash"] if es else GENESIS
+            ts = now or _now()
+            e = {"seq": seq, "type": etype, "ts": ts, "prev": prev, "body": body, "hash": entry_hash(seq, etype, ts, prev, body)}
+            line = json.dumps(e, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+                fh.flush()
+                os.fsync(fh.fileno())
         return e
 
     # ---------- commands ----------
     def register(self, protocol: dict, source_bytes: bytes | None = None, now: str | None = None) -> dict:
+        if not isinstance(protocol, dict):
+            raise LedgerError("protocol must be a JSON object")
         missing = [k for k in PROTOCOL_REQUIRED if k not in protocol]
         if missing:
             raise LedgerError(f"protocol is missing: {', '.join(missing)}")
+        clean_text(protocol["name"], "protocol name")
         if protocol["metric"] not in METRICS:
             raise LedgerError(f"metric must be one of {METRICS}")
-        if not (isinstance(protocol["n_target"], int) and protocol["n_target"] > 0):
+        n = protocol["n_target"]
+        if not (isinstance(n, int) and not isinstance(n, bool) and n > 0):
             raise LedgerError("n_target must be a positive integer")
-        if not (0 < protocol["alpha"] < 1):
-            raise LedgerError("alpha must be between 0 and 1")
+        if not (_is_number(protocol["alpha"]) and 0 < protocol["alpha"] < 1):
+            raise LedgerError("alpha must be a number between 0 and 1")
+        k = protocol.get("n_comparisons", 1)
+        if not (isinstance(k, int) and not isinstance(k, bool) and k >= 1):
+            raise LedgerError("n_comparisons must be a positive integer")
+        if len(canonical(protocol)) > MAX_META_BYTES:
+            raise LedgerError("protocol is too large")
         body = {"protocol": protocol}
         if source_bytes is not None:
             body["source_sha256"] = hashlib.sha256(source_bytes).hexdigest()
-        e = self._append("protocol", body, now)
-        return e
+        return self._append("protocol", body, now)
 
     def protocols(self) -> dict[str, dict]:
         return {e["hash"]: e for e in self.entries() if e["type"] == "protocol"}
 
-    def predict(self, pid: str, protocol_hash: str, forecaster: str, probs: dict, meta: dict | None = None, now: str | None = None) -> dict:
+    def predict(self, pid: str, protocol_hash: str, forecaster: str, probs: dict, event: str | None = None,
+                meta: dict | None = None, now: str | None = None) -> dict:
+        pid = clean_text(pid, "prediction id")
+        forecaster = clean_text(forecaster, "forecaster")
+        event = clean_text(event if event is not None else pid, "event")
         if protocol_hash not in self.protocols():
             raise LedgerError("unknown protocol hash; register the protocol before predicting")
-        if any(e["type"] == "prediction" and e["body"]["id"] == pid for e in self.entries()):
-            raise LedgerError(f"prediction id {pid!r} already exists (the ledger is append-only)")
-        if not probs or len(probs) < 2:
+        if not isinstance(probs, dict) or len(probs) < 2:
             raise LedgerError("probs needs at least two outcomes, e.g. {'yes': 0.7, 'no': 0.3}")
         for k, v in probs.items():
-            if not (isinstance(v, (int, float)) and 0.0 <= v <= 1.0 and math.isfinite(v)):
+            clean_text(k, "outcome label")
+            if not (_is_number(v) and 0.0 <= v <= 1.0):
                 raise LedgerError(f"probability for {k!r} must be a number in [0, 1]")
         if abs(sum(probs.values()) - 1.0) > 1e-6:
             raise LedgerError(f"probabilities must sum to 1 (got {sum(probs.values()):.6f})")
-        body = {"id": pid, "protocol": protocol_hash, "forecaster": forecaster, "probs": probs}
-        if meta:
+        es = self.entries()
+        if any(e["type"] == "prediction" and e["body"]["id"] == pid for e in es):
+            raise LedgerError(f"prediction id {pid!r} already exists (the ledger is append-only)")
+        if any(e["type"] == "outcome" and e["body"]["event"] == event for e in es):
+            raise LedgerError(f"event {event!r} is already resolved; no new predictions for it")
+        body = {"id": pid, "event": event, "protocol": protocol_hash, "forecaster": forecaster, "probs": probs}
+        if meta is not None:
+            if not isinstance(meta, dict) or len(canonical(meta)) > MAX_META_BYTES:
+                raise LedgerError("meta must be a small JSON object")
             body["meta"] = meta
         return self._append("prediction", body, now)
 
-    def resolve(self, pid: str, outcome: str, now: str | None = None) -> dict:
-        preds = {e["body"]["id"]: e for e in self.entries() if e["type"] == "prediction"}
-        if pid not in preds:
-            raise LedgerError(f"no prediction with id {pid!r}")
-        if outcome not in preds[pid]["body"]["probs"]:
-            raise LedgerError(f"outcome {outcome!r} is not one of {list(preds[pid]['body']['probs'])}")
-        if any(e["type"] == "outcome" and e["body"]["id"] == pid for e in self.entries()):
-            raise LedgerError(f"{pid!r} is already resolved")
-        return self._append("outcome", {"id": pid, "outcome": outcome}, now)
+    def resolve(self, event: str, outcome: str, now: str | None = None) -> dict:
+        event = clean_text(event, "event")
+        es = self.entries()
+        preds = [e for e in es if e["type"] == "prediction" and e["body"]["event"] == event]
+        if not preds:
+            raise LedgerError(f"no predictions for event {event!r}")
+        for p in preds:
+            if outcome not in p["body"]["probs"]:
+                raise LedgerError(f"outcome {outcome!r} is not one of {list(p['body']['probs'])} (prediction {p['body']['id']!r})")
+        if any(e["type"] == "outcome" and e["body"]["event"] == event for e in es):
+            raise LedgerError(f"event {event!r} is already resolved")
+        return self._append("outcome", {"event": event, "outcome": outcome}, now)
+
+    def log_analysis(self, protocol_hash: str, kind: str, what: str, n_resolved: int, now: str | None = None) -> dict:
+        """Every look at the results is recorded, so interim peeking stays visible."""
+        if protocol_hash not in self.protocols():
+            raise LedgerError("unknown protocol hash")
+        return self._append("analysis", {"protocol": protocol_hash, "kind": kind, "what": clean_text(what, "analysis"), "n_resolved": n_resolved}, now)
+
+    def resolved_items(self, protocol_hash: str) -> list[dict]:
+        """One row per resolved prediction under a protocol."""
+        es = self.entries()
+        outs = {e["body"]["event"]: e["body"]["outcome"] for e in es if e["type"] == "outcome"}
+        rows = []
+        for e in es:
+            b = e["body"]
+            if e["type"] == "prediction" and b["protocol"] == protocol_hash and b["event"] in outs:
+                rows.append({"id": b["id"], "event": b["event"], "forecaster": b["forecaster"], "probs": b["probs"], "outcome": outs[b["event"]]})
+        return rows
 
     # ---------- verification ----------
-    def verify(self) -> list[str]:
-        """Return a list of problems (empty list = the ledger is intact)."""
+    def verify(self, expected_head: str | None = None) -> list[str]:
+        """Return a list of problems (empty list = the ledger is intact).
+
+        ``expected_head``: a head hash you saved earlier (published or timestamped). If it is not
+        in the chain, entries were removed or rewritten.
+        """
         problems: list[str] = []
         prev = GENESIS
+        last_ts = ""
         protos: set[str] = set()
-        pred_ids: dict[str, str] = {}
+        pred_ids: set[str] = set()
+        pred_events: dict[str, list[dict]] = {}
         resolved: set[str] = set()
+        hashes: set[str] = set()
         for i, e in enumerate(self.entries(), 1):
-            if e.get("seq") != i:
-                problems.append(f"entry {i}: seq is {e.get('seq')}, expected {i}")
-            if e.get("prev") != prev:
-                problems.append(f"entry {i}: prev hash does not match the previous entry")
-            want = entry_hash(e.get("seq"), e.get("type"), e.get("ts"), e.get("prev"), e.get("body"))
-            if e.get("hash") != want:
-                problems.append(f"entry {i}: content does not match its hash (edited?)")
-            prev = e.get("hash", "")
-            t, b = e.get("type"), e.get("body", {})
-            if t == "protocol":
-                protos.add(e.get("hash"))
-            elif t == "prediction":
-                if b.get("protocol") not in protos:
-                    problems.append(f"entry {i}: prediction refers to an unregistered protocol")
-                if b.get("id") in pred_ids:
-                    problems.append(f"entry {i}: duplicate prediction id {b.get('id')!r}")
-                pred_ids[b.get("id")] = e.get("ts")
-            elif t == "outcome":
-                if b.get("id") not in pred_ids:
-                    problems.append(f"entry {i}: outcome for an unknown prediction")
-                elif b.get("id") in resolved:
-                    problems.append(f"entry {i}: prediction {b.get('id')!r} resolved twice")
-                resolved.add(b.get("id"))
-            else:
-                problems.append(f"entry {i}: unknown type {t!r}")
+            try:
+                if e.get("seq") != i:
+                    problems.append(f"entry {i}: seq is {e.get('seq')}, expected {i}")
+                if e.get("prev") != prev:
+                    problems.append(f"entry {i}: prev hash does not match the previous entry")
+                want = entry_hash(e.get("seq"), e.get("type"), e.get("ts"), e.get("prev"), e.get("body"))
+                if e.get("hash") != want:
+                    problems.append(f"entry {i}: content does not match its hash (edited?)")
+                ts = e.get("ts") or ""
+                if ts < last_ts:
+                    problems.append(f"entry {i}: timestamp goes backwards")
+                last_ts = max(last_ts, ts)
+                prev = e.get("hash", "")
+                hashes.add(prev)
+                t, b = e.get("type"), e.get("body") or {}
+                if t == "protocol":
+                    protos.add(e.get("hash"))
+                elif t == "prediction":
+                    if b.get("protocol") not in protos:
+                        problems.append(f"entry {i}: prediction refers to an unregistered protocol")
+                    if b.get("id") in pred_ids:
+                        problems.append(f"entry {i}: duplicate prediction id {b.get('id')!r}")
+                    if b.get("event") in resolved:
+                        problems.append(f"entry {i}: prediction made after its event {b.get('event')!r} was resolved")
+                    pred_ids.add(b.get("id"))
+                    pred_events.setdefault(b.get("event"), []).append(b)
+                elif t == "outcome":
+                    ev = b.get("event")
+                    if ev not in pred_events:
+                        problems.append(f"entry {i}: outcome for an event with no predictions")
+                    elif ev in resolved:
+                        problems.append(f"entry {i}: event {ev!r} resolved twice")
+                    elif any(b.get("outcome") not in p.get("probs", {}) for p in pred_events[ev]):
+                        problems.append(f"entry {i}: outcome is not a possible outcome of every prediction")
+                    resolved.add(ev)
+                elif t == "analysis":
+                    if b.get("protocol") not in protos:
+                        problems.append(f"entry {i}: analysis refers to an unregistered protocol")
+                else:
+                    problems.append(f"entry {i}: unknown type {t!r}")
+            except Exception as ex:  # malformed entry shapes must not crash verification
+                problems.append(f"entry {i}: malformed ({type(ex).__name__})")
+        if expected_head and expected_head != GENESIS and expected_head not in hashes:
+            problems.append("the expected head hash is not in the chain (entries removed or rewritten)")
         return problems
 
     def status(self) -> dict:
         es = self.entries()
         ps = [e for e in es if e["type"] == "prediction"]
-        os_ = {e["body"]["id"] for e in es if e["type"] == "outcome"}
-        return {"entries": len(es), "protocols": len(self.protocols()), "predictions": len(ps),
-                "resolved": len(os_), "open": len(ps) - len(os_), "head": self.head()}
+        events = {e["body"]["event"] for e in ps}
+        done = {e["body"]["event"] for e in es if e["type"] == "outcome"}
+        return {"entries": len(es), "protocols": len(self.protocols()), "predictions": len(ps), "events": len(events),
+                "resolved_events": len(done), "open_events": len(events - done),
+                "analyses": sum(1 for e in es if e["type"] == "analysis"), "head": self.head()}

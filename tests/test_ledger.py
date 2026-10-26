@@ -1,4 +1,5 @@
 import json
+import multiprocessing as mp
 import pytest
 from forecastseal import Ledger, LedgerError
 from forecastseal.cli import main
@@ -24,7 +25,15 @@ def test_chain_is_intact_after_normal_use(led):
     led.resolve("p1", "yes")
     assert led.verify() == []
     st = led.status()
-    assert (st["predictions"], st["resolved"], st["open"]) == (2, 1, 1)
+    assert (st["predictions"], st["resolved_events"], st["open_events"]) == (2, 1, 1)
+
+
+def test_two_forecasters_one_event(led):
+    h = sealed(led)
+    led.predict("A1", h, "A", {"yes": 0.7, "no": 0.3}, event="e1")
+    led.predict("B1", h, "B", {"yes": 0.4, "no": 0.6}, event="e1")
+    led.resolve("e1", "yes")
+    assert len(led.resolved_items(h)) == 2
 
 
 def test_editing_a_probability_is_detected(led):
@@ -40,52 +49,57 @@ def test_editing_a_probability_is_detected(led):
     assert problems and any("edited" in p for p in problems)
 
 
-def test_deleting_an_entry_is_detected(led):
+def test_deleting_or_reordering_is_detected(led):
     h = sealed(led)
     led.predict("p1", h, "me", {"yes": 0.7, "no": 0.3})
     led.predict("p2", h, "me", {"yes": 0.6, "no": 0.4})
     lines = led.path.read_text(encoding="utf-8").splitlines()
     led.path.write_text("\n".join([lines[0], lines[2]]) + "\n", encoding="utf-8")
     assert led.verify() != []
-
-
-def test_reordering_is_detected(led):
-    h = sealed(led)
-    led.predict("p1", h, "me", {"yes": 0.7, "no": 0.3})
-    led.predict("p2", h, "me", {"yes": 0.6, "no": 0.4})
-    lines = led.path.read_text(encoding="utf-8").splitlines()
     led.path.write_text("\n".join([lines[0], lines[2], lines[1]]) + "\n", encoding="utf-8")
     assert led.verify() != []
 
 
-def test_head_changes_with_every_entry(led):
-    h0 = led.head()
+def test_truncating_the_tail_needs_an_anchored_head(led):
     h = sealed(led)
-    assert led.head() != h0 and led.head() == h
+    led.predict("p1", h, "me", {"yes": 0.7, "no": 0.3})
+    led.resolve("p1", "yes")
+    anchored = led.head()
+    lines = led.path.read_text(encoding="utf-8").splitlines()
+    led.path.write_text("\n".join(lines[:2]) + "\n", encoding="utf-8")   # remove the outcome
+    assert led.verify() == []                                            # chain alone cannot see it
+    assert any("expected head" in p for p in led.verify(expected_head=anchored))
+
+
+def test_prediction_after_the_outcome_is_refused_and_flagged(led):
+    h = sealed(led)
+    led.predict("A1", h, "A", {"yes": 0.7, "no": 0.3}, event="e1")
+    led.resolve("e1", "yes")
+    with pytest.raises(LedgerError):
+        led.predict("B1", h, "B", {"yes": 0.99, "no": 0.01}, event="e1")
+    # a hand-built entry that skips the checks is still caught by verify()
+    led._append("prediction", {"id": "B1", "event": "e1", "protocol": h, "forecaster": "B", "probs": {"yes": 0.99, "no": 0.01}})
+    assert any("after its event" in p for p in led.verify())
 
 
 def test_protocol_must_be_valid(led):
-    with pytest.raises(LedgerError):
-        led.register({"name": "x"})
-    with pytest.raises(LedgerError):
-        led.register({**PROTO, "metric": "accuracy"})
-    with pytest.raises(LedgerError):
-        led.register({**PROTO, "alpha": 1.5})
-    with pytest.raises(LedgerError):
-        led.register({**PROTO, "n_target": 0})
+    for bad in ({"name": "x"}, {**PROTO, "metric": "accuracy"}, {**PROTO, "alpha": 1.5}, {**PROTO, "alpha": True},
+                {**PROTO, "n_target": 0}, {**PROTO, "n_target": True}, {**PROTO, "n_comparisons": 0}, [1, 2], "text"):
+        with pytest.raises(LedgerError):
+            led.register(bad)
 
 
 def test_prediction_rules(led):
     h = sealed(led)
     with pytest.raises(LedgerError):
-        led.predict("p1", "deadbeef", "me", {"yes": 0.5, "no": 0.5})   # unknown protocol
-    with pytest.raises(LedgerError):
-        led.predict("p1", h, "me", {"yes": 0.6, "no": 0.6})            # does not sum to 1
-    with pytest.raises(LedgerError):
-        led.predict("p1", h, "me", {"yes": 1.0})                       # one outcome only
+        led.predict("p1", "deadbeef", "me", {"yes": 0.5, "no": 0.5})
+    for bad in ({"yes": 0.6, "no": 0.6}, {"yes": 1.0}, {"yes": float("nan"), "no": 0.5}, {"yes": True, "no": 0.0},
+                {"yes": "0.5", "no": 0.5}, {"yes": 1.2, "no": -0.2}, [0.5, 0.5]):
+        with pytest.raises(LedgerError):
+            led.predict("p1", h, "me", bad)
     led.predict("p1", h, "me", {"yes": 0.5, "no": 0.5})
     with pytest.raises(LedgerError):
-        led.predict("p1", h, "me", {"yes": 0.4, "no": 0.6})            # duplicate id: no overwriting
+        led.predict("p1", h, "me", {"yes": 0.4, "no": 0.6})
 
 
 def test_resolve_rules(led):
@@ -97,7 +111,31 @@ def test_resolve_rules(led):
         led.resolve("p1", "maybe")
     led.resolve("p1", "yes")
     with pytest.raises(LedgerError):
-        led.resolve("p1", "no")                                         # cannot change an outcome
+        led.resolve("p1", "no")
+
+
+def test_control_characters_are_refused(led):
+    h = sealed(led)
+    for bad in ("evil\x1b[31m", "tab\tname", "", "   ", "x" * 300, 5):
+        with pytest.raises(LedgerError):
+            led.predict(bad, h, "me", {"yes": 0.5, "no": 0.5})
+    with pytest.raises(LedgerError):
+        led.predict("ok", h, "bad\nname", {"yes": 0.5, "no": 0.5})
+
+
+def test_non_finite_numbers_in_the_file_are_refused(led):
+    sealed(led)
+    with led.path.open("a", encoding="utf-8") as fh:
+        fh.write('{"seq": 2, "type": "prediction", "body": {"x": NaN}}\n')
+    with pytest.raises(LedgerError):
+        led.entries()
+
+
+def test_garbage_lines_do_not_crash_verify(led):
+    sealed(led)
+    with led.path.open("a", encoding="utf-8") as fh:
+        fh.write('{"seq": 2, "type": "prediction", "body": 5, "prev": 1, "hash": 2, "ts": null}\n')
+    assert led.verify() != []
 
 
 def test_init_twice_is_refused(led):
@@ -105,17 +143,43 @@ def test_init_twice_is_refused(led):
         led.init()
 
 
-def test_cli_roundtrip(tmp_path, capsys):
+def _worker(args):
+    root, h, k = args
+    l = Ledger(root)
+    for i in range(10):
+        l.predict(f"w{k}-{i}", h, "me", {"yes": 0.5, "no": 0.5})
+
+
+def test_concurrent_writers_keep_one_chain(led):
+    h = sealed(led)
+    ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context()
+    with ctx.Pool(4) as pool:
+        pool.map(_worker, [(str(led.root), h, k) for k in range(4)])
+    assert led.verify() == []
+    assert led.status()["predictions"] == 40
+
+
+def test_cli_roundtrip_and_interim_rules(tmp_path, capsys):
     d = str(tmp_path / ".fseal")
     pf = tmp_path / "protocol.json"
-    pf.write_text(json.dumps(PROTO))
+    pf.write_text(json.dumps({**PROTO, "n_target": 40}))
     main(["--dir", d, "init"])
     main(["--dir", d, "register", str(pf)])
     h = Ledger(d).head()
-    main(["--dir", d, "predict", "--id", "a", "--protocol", h, "--probs", '{"yes":0.9,"no":0.1}'])
-    main(["--dir", d, "resolve", "a", "yes"])
+    for i in range(10):
+        ev = f"e{i}"
+        main(["--dir", d, "predict", "--id", f"A{i}", "--event", ev, "--forecaster", "A", "--probs", '{"yes":0.6,"no":0.4}'])
+        main(["--dir", d, "predict", "--id", f"B{i}", "--event", ev, "--forecaster", "B", "--probs", '{"yes":0.9,"no":0.1}'])
+        main(["--dir", d, "resolve", ev, "yes" if i % 5 else "no"])
     main(["--dir", d, "verify"])
-    assert "ledger intact" in capsys.readouterr().out
-    with pytest.raises(SystemExit) as ex:
-        main(["--dir", d, "resolve", "a", "no"])
+    with pytest.raises(SystemExit) as ex:                   # 10 of 40: no verdict without --interim
+        main(["--dir", d, "test", "A", "B"])
     assert ex.value.code == 2
+    main(["--dir", d, "test", "A", "B", "--interim"])
+    out = capsys.readouterr().out
+    assert "INTERIM" in out and "ledger intact" in out
+    assert Ledger(d).status()["analyses"] == 1              # the look was recorded
+    main(["--dir", d, "score"])
+    main(["--dir", d, "calibration"])
+    main(["--dir", d, "power", "--sd", "0.085", "--delta", "0.004"])
+    assert "events needed" in capsys.readouterr().out

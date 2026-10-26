@@ -3,14 +3,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
-from .ledger import Ledger, LedgerError
+from . import stats
+from .ledger import Ledger, LedgerError, loads
 
 
 def _ledger(args) -> Ledger:
     return Ledger(args.dir)
+
+
+def _protocol_hash(led: Ledger, args) -> str:
+    ps = led.protocols()
+    if getattr(args, "protocol", None):
+        if args.protocol not in ps:
+            raise LedgerError("unknown protocol hash")
+        return args.protocol
+    if len(ps) == 1:
+        return next(iter(ps))
+    raise LedgerError("several protocols are registered; pass --protocol <hash>")
+
+
+def _proto(led: Ledger, h: str) -> dict:
+    return led.protocols()[h]["body"]["protocol"]
 
 
 def cmd_init(args):
@@ -19,8 +36,12 @@ def cmd_init(args):
 
 
 def cmd_register(args):
-    raw = Path(args.protocol).read_bytes()
-    e = _ledger(args).register(json.loads(raw), source_bytes=raw)
+    raw = Path(args.protocol_file).read_bytes()
+    try:
+        data = loads(raw.decode("utf-8"))
+    except ValueError as e:
+        raise LedgerError(f"protocol file is not valid JSON: {e}") from e
+    e = _ledger(args).register(data, source_bytes=raw)
     print(f"sealed protocol {e['body']['protocol']['name']!r}\nprotocol hash: {e['hash']}")
 
 
@@ -30,56 +51,151 @@ def cmd_predict(args):
         n = 0
         for line in Path(args.file).read_text(encoding="utf-8").splitlines():
             if line.strip():
-                r = json.loads(line)
-                led.predict(r["id"], r["protocol"], r.get("forecaster", "anon"), r["probs"], r.get("meta"))
+                r = loads(line)
+                led.predict(r["id"], r["protocol"], r.get("forecaster", "anon"), r["probs"], event=r.get("event"), meta=r.get("meta"))
                 n += 1
         print(f"appended {n} predictions")
     else:
-        led.predict(args.id, args.protocol, args.forecaster, json.loads(args.probs))
+        if not (args.id and args.probs):
+            raise LedgerError("give --id and --probs, or --file")
+        led.predict(args.id, _protocol_hash(led, args), args.forecaster, loads(args.probs), event=args.event)
         print(f"appended prediction {args.id}")
 
 
 def cmd_resolve(args):
-    _ledger(args).resolve(args.id, args.outcome)
-    print(f"resolved {args.id} -> {args.outcome}")
+    _ledger(args).resolve(args.event, args.outcome)
+    print(f"resolved {args.event} -> {args.outcome}")
 
 
 def cmd_verify(args):
-    problems = _ledger(args).verify()
+    led = _ledger(args)
+    problems = led.verify(expected_head=args.expected_head)
     if problems:
         print("LEDGER BROKEN")
         for p in problems:
             print(" -", p)
         sys.exit(1)
-    print("ledger intact; head:", _ledger(args).head())
+    print("ledger intact; head:", led.head())
 
 
 def cmd_status(args):
     for k, v in _ledger(args).status().items():
-        print(f"{k:12s} {v}")
+        print(f"{k:16s} {v}")
 
 
 def cmd_head(args):
     print(_ledger(args).head())
 
 
+def cmd_score(args):
+    led = _ledger(args)
+    h = _protocol_hash(led, args)
+    metric = _proto(led, h)["metric"]
+    res = stats.score(led.resolved_items(h), metric)
+    print(f"metric: {metric} (lower is better)")
+    for name, r in sorted(res.items(), key=lambda kv: kv[1]["mean"]):
+        print(f"  {name:24s} n={r['n']:<5d} mean={r['mean']:.4f}")
+
+
+def cmd_calibration(args):
+    led = _ledger(args)
+    h = _protocol_hash(led, args)
+    rows = [r for r in led.resolved_items(h) if not args.forecaster or r["forecaster"] == args.forecaster]
+    cal = stats.calibration(rows)
+    print(f"pairs: {cal['n']}   ECE: {cal['ece']:.4f}   (bins with few pairs are noise)")
+    print("  bin          n   mean_pred   observed")
+    for b in cal["bins"]:
+        print(f"  {b['lo']:.1f}-{b['hi']:.1f}  {b['n']:6d}   {b['mean_pred']:.3f}       {b['freq']:.3f}")
+
+
+def cmd_test(args):
+    led = _ledger(args)
+    h = _protocol_hash(led, args)
+    proto = _proto(led, h)
+    rows = led.resolved_items(h)
+    try:
+        res = stats.compare(rows, proto["metric"], args.a, args.b, proto["alpha"], proto.get("n_comparisons", 1), seed=args.seed)
+    except ValueError as e:
+        raise LedgerError(str(e)) from e
+    final = res["n"] >= proto["n_target"]
+    if not final and not args.interim:
+        raise LedgerError(f"only {res['n']} of the {proto['n_target']} planned events are resolved. "
+                          "Wait, or pass --interim (the look is recorded in the ledger and is not a verdict).")
+    prior_final = sum(1 for e in led.entries() if e["type"] == "analysis" and e["body"]["protocol"] == h and e["body"]["kind"] == "final")
+    led.log_analysis(h, "final" if final else "interim", f"test {args.a} vs {args.b}", res["n"])
+    lo, hi = res["ci"]
+    print(f"{args.a} vs {args.b}  ({proto['metric']}, difference = {args.a} minus {args.b}; negative favours {args.a})")
+    print(f"  paired events: {res['n']}   mean difference: {res['mean_diff']:+.4f}   sd: {res['sd']:.4f}")
+    print(f"  {100 * (1 - res['alpha_adj']):.2f}% interval (alpha {proto['alpha']} / {proto.get('n_comparisons', 1)} planned comparisons): [{lo:+.4f}, {hi:+.4f}]")
+    if res["n"] < 30:
+        print("  warning: fewer than 30 paired events; intervals are unreliable at this size")
+    if not final:
+        print("  INTERIM LOOK, not a verdict. This look is recorded in the ledger.")
+    else:
+        verdict = "interval excludes 0" if res["excludes_zero"] else "interval includes 0: no difference shown"
+        print(f"  verdict: {verdict}")
+        if prior_final >= proto.get("n_comparisons", 1):
+            print(f"  warning: this is final analysis #{prior_final + 1}, but the protocol planned {proto.get('n_comparisons', 1)} comparison(s). Treat the interval as too narrow.")
+
+
+def cmd_power(args):
+    sd = args.sd
+    if args.from_ledger:
+        led = _ledger(args)
+        h = _protocol_hash(led, args)
+        a, b = args.from_ledger
+        d = stats.paired_diffs(led.resolved_items(h), _proto(led, h)["metric"], a, b)
+        if len(d) < 2:
+            raise LedgerError("need at least two paired events to estimate the spread")
+        sd = stats.stdev(d)
+        print(f"spread estimated from {len(d)} paired events: sd = {sd:.4f}")
+    if sd is None or sd <= 0:
+        raise LedgerError("give --sd (spread of per-event loss differences) or --from-ledger A B")
+    alpha = args.alpha / args.n_comparisons
+    print(f"alpha {args.alpha} / {args.n_comparisons} comparison(s) = {alpha:.4f}, two-sided, normal approximation")
+    if args.delta:
+        print(f"chance of detecting a true improvement of {args.delta}:")
+        for n in (50, 100, 200, 400, 800, 1600):
+            print(f"  n={n:<5d} {100 * stats.power(n, args.delta, sd, alpha):5.1f}%")
+        print(f"events needed for 80% power: {stats.required_n(args.delta, sd, alpha)}")
+    if args.n:
+        print(f"smallest true improvement detectable with 80% power at n={args.n}: {stats.min_detectable(args.n, sd, alpha):.4f}")
+    if not (args.delta or args.n):
+        raise LedgerError("give --delta and/or --n")
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="fseal", description="Seal the plan, append forecasts, resolve outcomes, verify the chain.")
+    p = argparse.ArgumentParser(prog="fseal", description="Seal the plan, append forecasts, resolve outcomes, verify, score and test.")
     p.add_argument("--dir", default=".fseal", help="ledger directory (default .fseal)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("init", help="create an empty ledger").set_defaults(fn=cmd_init)
-    s = sub.add_parser("register", help="seal an analysis protocol (JSON file)"); s.add_argument("protocol"); s.set_defaults(fn=cmd_register)
-    s = sub.add_parser("predict", help="append a prediction (or --file JSONL)")
-    s.add_argument("--file"); s.add_argument("--id"); s.add_argument("--protocol"); s.add_argument("--forecaster", default="anon")
-    s.add_argument("--probs", help='JSON, e.g. \'{"yes":0.7,"no":0.3}\''); s.set_defaults(fn=cmd_predict)
-    s = sub.add_parser("resolve", help="record the outcome of a prediction"); s.add_argument("id"); s.add_argument("outcome"); s.set_defaults(fn=cmd_resolve)
-    sub.add_parser("verify", help="check the hash chain").set_defaults(fn=cmd_verify)
-    sub.add_parser("status", help="counts and head hash").set_defaults(fn=cmd_status)
-    sub.add_parser("head", help="print the head hash (publish or timestamp it)").set_defaults(fn=cmd_head)
+
+    def add(name, fn, help_):
+        s = sub.add_parser(name, help=help_)
+        s.set_defaults(fn=fn)
+        return s
+
+    add("init", cmd_init, "create an empty ledger")
+    s = add("register", cmd_register, "seal an analysis protocol (JSON file)"); s.add_argument("protocol_file")
+    s = add("predict", cmd_predict, "append a prediction (or --file JSONL)")
+    s.add_argument("--file"); s.add_argument("--id"); s.add_argument("--event"); s.add_argument("--protocol")
+    s.add_argument("--forecaster", default="anon"); s.add_argument("--probs", help='JSON, e.g. \'{"yes":0.7,"no":0.3}\'')
+    s = add("resolve", cmd_resolve, "record the outcome of an event"); s.add_argument("event"); s.add_argument("outcome")
+    s = add("verify", cmd_verify, "check the hash chain"); s.add_argument("--expected-head", help="a head hash you saved or timestamped earlier")
+    add("status", cmd_status, "counts and head hash")
+    add("head", cmd_head, "print the head hash (publish or timestamp it)")
+    s = add("score", cmd_score, "mean loss per forecaster"); s.add_argument("--protocol")
+    s = add("calibration", cmd_calibration, "reliability table and ECE"); s.add_argument("--protocol"); s.add_argument("--forecaster")
+    s = add("test", cmd_test, "paired comparison of two forecasters with an interval")
+    s.add_argument("a"); s.add_argument("b"); s.add_argument("--protocol"); s.add_argument("--interim", action="store_true"); s.add_argument("--seed", type=int, default=43)
+    s = add("power", cmd_power, "how many events are needed to detect a difference")
+    s.add_argument("--sd", type=float); s.add_argument("--delta", type=float); s.add_argument("--n", type=int)
+    s.add_argument("--alpha", type=float, default=0.05); s.add_argument("--n-comparisons", type=int, default=1)
+    s.add_argument("--from-ledger", nargs=2, metavar=("A", "B")); s.add_argument("--protocol")
+
     args = p.parse_args(argv)
     try:
         args.fn(args)
-    except LedgerError as e:
+    except (LedgerError, ValueError, OSError, KeyError) as e:
         print("error:", e, file=sys.stderr)
         sys.exit(2)
 

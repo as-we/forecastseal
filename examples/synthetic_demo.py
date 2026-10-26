@@ -44,3 +44,6 @@ if __name__ == "__main__":
     r = stats.compare(rows, "log_loss", "B", "A", 0.05)
     print("B minus A:", round(r["mean_diff"], 4), "interval", tuple(round(x, 4) for x in r["ci"]), "excludes 0:", r["excludes_zero"])
     print("verify:", led.verify() or "intact")
+    from forecastseal import report
+    Path("demo_report.html").write_text(report.build(led, h, compare=[("B", "A")]), encoding="utf-8")
+    print("wrote demo_report.html")

@@ -7,3 +7,5 @@ build/
 .pytest_cache/
 .fseal/
 demo_ledger/
+demo_report.html
+report.html

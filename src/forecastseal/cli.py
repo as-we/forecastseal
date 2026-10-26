@@ -7,7 +7,7 @@ import math
 import sys
 from pathlib import Path
 
-from . import stats
+from . import report, stats, workflow
 from .ledger import Ledger, LedgerError, loads
 
 
@@ -111,31 +111,29 @@ def cmd_calibration(args):
 def cmd_test(args):
     led = _ledger(args)
     h = _protocol_hash(led, args)
-    proto = _proto(led, h)
-    rows = led.resolved_items(h)
-    try:
-        res = stats.compare(rows, proto["metric"], args.a, args.b, proto["alpha"], proto.get("n_comparisons", 1), seed=args.seed)
-    except ValueError as e:
-        raise LedgerError(str(e)) from e
-    final = res["n"] >= proto["n_target"]
-    if not final and not args.interim:
-        raise LedgerError(f"only {res['n']} of the {proto['n_target']} planned events are resolved. "
-                          "Wait, or pass --interim (the look is recorded in the ledger and is not a verdict).")
-    prior_final = sum(1 for e in led.entries() if e["type"] == "analysis" and e["body"]["protocol"] == h and e["body"]["kind"] == "final")
-    led.log_analysis(h, "final" if final else "interim", f"test {args.a} vs {args.b}", res["n"])
+    res = workflow.compare_logged(led, h, args.a, args.b, interim=args.interim, seed=args.seed)
     lo, hi = res["ci"]
-    print(f"{args.a} vs {args.b}  ({proto['metric']}, difference = {args.a} minus {args.b}; negative favours {args.a})")
+    print(f"{args.a} vs {args.b}  ({res['metric']}, difference = {args.a} minus {args.b}; negative favours {args.a})")
     print(f"  paired events: {res['n']}   mean difference: {res['mean_diff']:+.4f}   sd: {res['sd']:.4f}")
-    print(f"  {100 * (1 - res['alpha_adj']):.2f}% interval (alpha {proto['alpha']} / {proto.get('n_comparisons', 1)} planned comparisons): [{lo:+.4f}, {hi:+.4f}]")
+    print(f"  {100 * (1 - res['alpha_adj']):.2f}% interval (alpha {res['alpha']} / {res['planned']} planned comparisons): [{lo:+.4f}, {hi:+.4f}]")
     if res["n"] < 30:
         print("  warning: fewer than 30 paired events; intervals are unreliable at this size")
-    if not final:
+    if not res["final"]:
         print("  INTERIM LOOK, not a verdict. This look is recorded in the ledger.")
     else:
-        verdict = "interval excludes 0" if res["excludes_zero"] else "interval includes 0: no difference shown"
-        print(f"  verdict: {verdict}")
-        if prior_final >= proto.get("n_comparisons", 1):
-            print(f"  warning: this is final analysis #{prior_final + 1}, but the protocol planned {proto.get('n_comparisons', 1)} comparison(s). Treat the interval as too narrow.")
+        print("  verdict:", "interval excludes 0" if res["excludes_zero"] else "interval includes 0: no difference shown")
+        if res["prior_final"] >= res["planned"]:
+            print(f"  warning: this is final analysis #{res['prior_final'] + 1}, but the protocol planned {res['planned']} comparison(s). Treat the interval as too narrow.")
+
+
+def cmd_report(args):
+    led = _ledger(args)
+    h = _protocol_hash(led, args)
+    pairs = [tuple(c) for c in (args.compare or [])]
+    page = report.build(led, h, compare=pairs, interim=args.interim, seed=args.seed)
+    out = Path(args.output)
+    out.write_text(page, encoding="utf-8")
+    print(f"wrote {out} ({len(page) // 1024} KB, self-contained: no scripts, no external requests)")
 
 
 def cmd_power(args):
@@ -187,6 +185,10 @@ def main(argv=None):
     s = add("calibration", cmd_calibration, "reliability table and ECE"); s.add_argument("--protocol"); s.add_argument("--forecaster")
     s = add("test", cmd_test, "paired comparison of two forecasters with an interval")
     s.add_argument("a"); s.add_argument("b"); s.add_argument("--protocol"); s.add_argument("--interim", action="store_true"); s.add_argument("--seed", type=int, default=43)
+    s = add("report", cmd_report, "write a self-contained HTML report")
+    s.add_argument("-o", "--output", default="report.html"); s.add_argument("--protocol"); s.add_argument("--seed", type=int, default=43)
+    s.add_argument("--compare", nargs=2, action="append", metavar=("A", "B"), help="add a paired comparison (repeatable); logged like `test`")
+    s.add_argument("--interim", action="store_true")
     s = add("power", cmd_power, "how many events are needed to detect a difference")
     s.add_argument("--sd", type=float); s.add_argument("--delta", type=float); s.add_argument("--n", type=int)
     s.add_argument("--alpha", type=float, default=0.05); s.add_argument("--n-comparisons", type=int, default=1)

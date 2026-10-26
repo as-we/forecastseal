@@ -38,6 +38,11 @@ def _by_forecaster(rows: list[dict], metric: str) -> dict[str, dict[str, float]]
     return out
 
 
+def loss_lists(rows: list[dict], metric: str) -> dict[str, list[float]]:
+    """Per-forecaster list of per-event losses (event order)."""
+    return {k: [d[e] for e in sorted(d)] for k, d in _by_forecaster(rows, metric).items()}
+
+
 def score(rows: list[dict], metric: str) -> dict[str, dict]:
     res = {}
     for name, d in _by_forecaster(rows, metric).items():

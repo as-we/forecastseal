@@ -2,8 +2,8 @@
 
 Seal your analysis plan before the outcome is known, append forecasts to a tamper-evident ledger, then score and test them honestly.
 
-> **Status: pre-alpha (v0.0.2).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`) and power planning (`power`).
-> Planned: an HTML report, optional OpenTimestamps anchoring.
+> **Status: pre-alpha (v0.0.3).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
+> Planned: continuous-valued metrics, optional OpenTimestamps anchoring.
 
 ## Why
 
@@ -39,9 +39,12 @@ fseal power --sd 0.085 --delta 0.004   # how many events are needed to see a dif
 fseal score                            # mean loss per forecaster
 fseal calibration --forecaster A       # reliability table and ECE
 fseal test A B                         # paired comparison; refuses before n_target unless --interim
+fseal report -o report.html --compare A B   # one HTML file: scores, calibration, comparison, analysis log
 ```
 
-A runnable synthetic example (no real-world data) is in `examples/synthetic_demo.py`.
+A runnable synthetic example (no real-world data) is in `examples/synthetic_demo.py`; it also writes `demo_report.html`.
+
+The report is a single HTML file with no scripts and no external requests (a strict Content-Security-Policy is embedded; every string from the ledger is escaped). If the hash chain does not verify, the report says so at the top. Asking for a comparison in the report follows the same rules as `fseal test` (refused before `n_target` unless `--interim`; every look is logged).
 
 ## Reading the statistics honestly
 - Intervals are percentile bootstrap intervals over events. With fewer than a few hundred events they can be too narrow ([Position: Don't Use the CLT in LLM Evals With Fewer Than a Few Hundred Datapoints](https://arxiv.org/pdf/2503.01747)); `test` warns below 30 events.

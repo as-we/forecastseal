@@ -39,4 +39,6 @@ def test_page_maths_matches_python():
 def test_page_has_no_network_and_a_strict_policy():
     src = PAGE.read_text(encoding="utf-8")
     assert "default-src 'none'" in src
-    assert not re.search(r"(src|href)=\"https?://", src) and "fetch(" not in src and "XMLHttpRequest" not in src
+    external = re.findall(r"(?:src|href)=\"(https?://[^\"]+)\"", src)
+    assert external == ["https://github.com/as-we/forecastseal"]       # one plain link to the project, nothing that loads a resource
+    assert "fetch(" not in src and "XMLHttpRequest" not in src

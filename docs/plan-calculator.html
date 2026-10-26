@@ -36,6 +36,7 @@ input,select{font:inherit;padding:7px 9px;border:1px solid var(--line);border-ra
 .good{background:var(--goodbg);color:var(--good)}.warn{background:var(--warnbg);color:var(--warn)}.bad{background:var(--badbg);color:var(--bad)}
 table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-weight:600;font-size:12px}td.n{text-align:right;font-variant-numeric:tabular-nums}
 .note{color:var(--muted);font-size:13px;margin:0}
+a{color:var(--accent)}
 [hidden]{display:none!important}
 </style>
 </head>
@@ -97,6 +98,7 @@ table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;p
   </div>
 </div>
 <p class="note" id="t-foot"></p>
+<p class="note"><a id="src-link" href="https://github.com/as-we/forecastseal" rel="noopener"></a></p>
 </main>
 
 <script>
@@ -139,7 +141,7 @@ const T = {
   splitv:(m)=>`Not with this split. The final test needs more items, so at most ${m} items can go to exploring and validating. Explore with fewer items, or skip a separate validation step.`,
   lowv:(p)=>`Not enough data. Even all your items would be ${p}% of what the final test needs, and splitting makes it worse. Options: collect more data going forward, accept a larger smallest difference, or treat every result as a hint and say so.`,
   foot:"A planning guide using a normal approximation (the same maths as `fseal plan` in forecastseal). Real data is messier: treat the numbers as a rough check, not a guarantee.",
-  other:"日本語"},
+  srclink:"forecastseal on GitHub (MIT license)",other:"日本語"},
  ja:{title:"データは足りていますか?",lead:"データを「探索・確認・本番」に分ける前に、最後の確かめで何かが見えるかを調べます。計算はすべてブラウザの中で行い、どこにも送信しません。",kind:"何を比べますか?",mscores:"点数(0〜1、1〜5、分など)",mrates:"合格率・成功率",n:"手元の件数は?",nh:"文書、行、ケース、問題など、「1 件」にあたるもの。",delta:"見つけたい最小の差",deltah:"点数と同じ単位で。5 点の改善では判断が変わらないなら、5 にします。",sd:"件ごとの差のばらつき",sdh:"分からなければ、小さな試験をするか、点数の幅の半分くらいから始めます。",p1:"いまの合格率(0〜1)",p2:"期待する合格率(0〜1)",rh:"2 つの別のグループとして計算します。同じ件を 2 回採点する場合は、慎重な見積もりになります。",split:"件数をどう分けますか?(%)",s1:"探索",s2:"確認",s3:"本番(最後の確かめ)",alpha:"誤って「差がある」と言う確率",comp:"比較する回数は?",have:"本番に使える件数は、必要な件数の",stage:"区分",items:"件数",
   explore:"探索(自由に見てよい)",validate:"確認(候補から選ぶ)",confirm:"本番(最後に 1 回だけ見る)",
   need:(n,r)=>`本番の確かめには、約 ${n} 件が必要です${r?"(各グループ)":""}。`,
@@ -149,13 +151,13 @@ const T = {
   splitv:(m)=>`この分け方では足りません。本番に必要な件数があるので、探索と確認に回せるのは、最大でも ${m} 件です。探索の件数を減らすか、確認の段階を省いてください。`,
   lowv:(p)=>`データが足りません。全部を本番に使っても、必要な件数の ${p}% で、分けるとさらに悪くなります。対策は、これから先のデータを集める、見つけたい差を大きくする、すべての結果を「ヒント」として扱ってそう書く、のどれかです。`,
   foot:"正規近似による計画の目安です(forecastseal の `fseal plan` と同じ計算)。実際のデータはもっと複雑なので、数字は保証ではなく、おおまかな確認として扱ってください。",
-  other:"English"}
+  srclink:"GitHub の forecastseal(MIT ライセンス)",other:"English"}
 };
 let lang=(navigator.language||"en").toLowerCase().startsWith("ja")?"ja":"en";
 const $=id=>document.getElementById(id);
 function setText(){
   const t=T[lang]; document.documentElement.lang=lang;
-  const map={"t-title":"title","t-lead":"lead","t-kind":"kind","t-m-scores":"mscores","t-m-rates":"mrates","t-n":"n","t-n-h":"nh","t-delta":"delta","t-delta-h":"deltah","t-sd":"sd","t-sd-h":"sdh","t-p1":"p1","t-p2":"p2","t-rates-h":"rh","t-split":"split","t-s1":"s1","t-s2":"s2","t-s3":"s3","t-alpha":"alpha","t-comp":"comp","t-have":"have","t-th-stage":"stage","t-th-n":"items","t-foot":"foot"};
+  const map={"t-title":"title","t-lead":"lead","t-kind":"kind","t-m-scores":"mscores","t-m-rates":"mrates","t-n":"n","t-n-h":"nh","t-delta":"delta","t-delta-h":"deltah","t-sd":"sd","t-sd-h":"sdh","t-p1":"p1","t-p2":"p2","t-rates-h":"rh","t-split":"split","t-s1":"s1","t-s2":"s2","t-s3":"s3","t-alpha":"alpha","t-comp":"comp","t-have":"have","t-th-stage":"stage","t-th-n":"items","t-foot":"foot","src-link":"srclink"};
   for(const k in map) $(k).textContent=t[map[k]];
   $("lang").textContent=t.other; document.title=t.title; calc();
 }

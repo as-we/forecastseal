@@ -7,6 +7,7 @@ First tagged state. Everything below is new.
 - Several metrics per protocol (primary / exploratory), non-inferiority margin, `agreement` (kappa, AC1).
 - Sealed evaluation sets (`--manifest`), CSV and JSONL import, all-or-nothing bulk recording.
 - Self-contained HTML report (`report`).
+- Fix: readers now take the ledger lock too, and every read-check-append operation holds it for its whole sequence, so a reader can no longer see a half-written last line while another process appends (seen as a flaky failure on a CI runner). Deterministic regression test added.
 - Report: a timeline of looks (x for a look before the planned size, a filled circle for a final analysis, a marker where a study stopped). `examples/sample_report.py`, `docs/sample-report.html`, README figures.
 - `fseal close`: record that a study ended (completed / stopped early / abandoned) and why; closed studies refuse new data; the report says what partial numbers can and cannot tell. `examples/peeking_demo.py`. `docs/for-llm-agents.md`.
 - `examples/noise_demo.py`: how often pure noise looks like a discovery, and how exploratory metrics are labelled.

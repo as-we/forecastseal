@@ -15,7 +15,9 @@ import datetime as dt
 import hashlib
 import json
 import math
+import functools
 import os
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -87,38 +89,70 @@ def _is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+def _atomic(fn):
+    """Run a whole read-check-append operation under the ledger lock."""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock():
+            return fn(self, *args, **kwargs)
+    return wrapper
+
+
 class Ledger:
     def __init__(self, root: str | Path = ".fseal"):
         self.root = Path(root)
         self.path = self.root / LEDGER_FILE
+        self._depth = 0
+        self._tlock = threading.RLock()
 
     # ---------- storage ----------
     @contextlib.contextmanager
     def _lock(self):
-        """Exclusive lock so two writers cannot fork the chain."""
-        self.root.mkdir(parents=True, exist_ok=True)
-        lock_path = self.root / LOCK_FILE
-        if fcntl is not None:
-            with open(lock_path, "a") as fh:
-                fcntl.flock(fh, fcntl.LOCK_EX)
+        """Exclusive lock for reading and writing the ledger, re-entrant within one Ledger object.
+
+        Readers take it too: without that, a reader can see a half-written last line while another
+        process is appending. Every operation that reads, checks and then appends holds it for the
+        whole sequence (see ``_atomic``), so two writers cannot both pass the same check.
+        """
+        with self._tlock:
+            if self._depth > 0:
+                self._depth += 1
                 try:
                     yield
                 finally:
-                    fcntl.flock(fh, fcntl.LOCK_UN)
-        else:  # pragma: no cover - portable fallback
-            for _ in range(200):
-                try:
-                    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                    break
-                except FileExistsError:
-                    time.sleep(0.05)
-            else:
-                raise LedgerError("could not obtain the ledger lock")
+                    self._depth -= 1
+                return
+            self.root.mkdir(parents=True, exist_ok=True)
+            lock_path = self.root / LOCK_FILE
+            fd = None
+            try:
+                if fcntl is not None:
+                    fh = open(lock_path, "a")
+                    fcntl.flock(fh, fcntl.LOCK_EX)
+                    fd = fh
+                else:  # pragma: no cover - portable fallback
+                    for _ in range(400):
+                        try:
+                            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                            break
+                        except FileExistsError:
+                            time.sleep(0.05)
+                    else:
+                        raise LedgerError("could not obtain the ledger lock")
+            except OSError:
+                fd = None                                   # read-only location: reading still works, writing will fail on its own
+            self._depth = 1
             try:
                 yield
             finally:
-                os.close(fd)
-                os.unlink(lock_path)
+                self._depth = 0
+                if fd is not None:
+                    if fcntl is not None:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        fd.close()
+                    else:  # pragma: no cover
+                        os.close(fd)
+                        os.unlink(lock_path)
 
     def init(self) -> None:
         if self.path.exists():
@@ -130,7 +164,7 @@ class Ledger:
         if not self.path.exists():
             raise LedgerError(f"no ledger at {self.path}; run `fseal init` first")
         out = []
-        with self.path.open("rb") as fh:
+        with self._lock(), self.path.open("rb") as fh:
             for n, raw in enumerate(fh, 1):
                 if len(raw) > MAX_LINE_BYTES:
                     raise LedgerError(f"line {n}: longer than {MAX_LINE_BYTES} bytes")
@@ -189,6 +223,7 @@ class Ledger:
         digest = hashlib.sha256("\n".join(sorted(cleaned)).encode("utf-8")).hexdigest()
         return {"sha256": digest, "count": len(cleaned)}
 
+    @_atomic
     def register(self, protocol: dict, source_bytes: bytes | None = None, now: str | None = None,
                  manifest_ids: list[str] | None = None) -> dict:
         if not isinstance(protocol, dict):
@@ -248,6 +283,7 @@ class Ledger:
     def protocols(self) -> dict[str, dict]:
         return {e["hash"]: e for e in self.entries() if e["type"] == "protocol"}
 
+    @_atomic
     def predict(self, pid: str, protocol_hash: str, forecaster: str, probs: dict, event: str | None = None,
                 meta: dict | None = None, now: str | None = None) -> dict:
         pid = clean_text(pid, "prediction id")
@@ -289,6 +325,7 @@ class Ledger:
             raise LedgerError(f"unknown metric {metric!r}; this protocol defines {names}")
         return metric
 
+    @_atomic
     def measure(self, item: str, system: str, value: float, protocol_hash: str, metric: str | None = None,
                 meta: dict | None = None, now: str | None = None) -> dict:
         """Record one score of one system on one item (for protocols of kind 'measure')."""
@@ -317,6 +354,7 @@ class Ledger:
             body["meta"] = meta
         return self._append("measurement", body, now)
 
+    @_atomic
     def measure_many(self, protocol_hash: str, rows: list[dict], skip_existing: bool = False, now: str | None = None) -> dict:
         """Record many measurements in one step: all rows are checked first and nothing is written if any is invalid.
 
@@ -384,6 +422,7 @@ class Ledger:
         kind = self.protocols()[protocol_hash]["body"]["protocol"].get("kind", "forecast")
         return self.measured_items(protocol_hash, metric) if kind == "measure" else self.resolved_items(protocol_hash)
 
+    @_atomic
     def resolve(self, event: str, outcome: str, now: str | None = None) -> dict:
         event = clean_text(event, "event")
         es = self.entries()
@@ -415,6 +454,7 @@ class Ledger:
             return len({e["body"]["item"] for e in self.entries() if e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash})
         return len({r["event"] for r in self.resolved_items(protocol_hash)})
 
+    @_atomic
     def close(self, protocol_hash: str, reason: str, kind: str | None = None, now: str | None = None) -> dict:
         """Record that a study ended, and why. A study that stops early is a result too: it stays visible.
 
@@ -436,6 +476,7 @@ class Ledger:
             raise LedgerError(f"only {n} of {target} planned items are complete; close it as stopped_early or abandoned")
         return self._append("closure", {"protocol": protocol_hash, "kind": kind, "reason": reason, "n_complete": n, "n_target": target}, now)
 
+    @_atomic
     def log_analysis(self, protocol_hash: str, kind: str, what: str, n_resolved: int, metric: str | None = None, now: str | None = None) -> dict:
         """Every look at the results is recorded, so interim peeking stays visible."""
         if protocol_hash not in self.protocols():

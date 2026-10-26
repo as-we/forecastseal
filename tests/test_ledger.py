@@ -1,4 +1,5 @@
 import json
+import time
 import multiprocessing as mp
 import pytest
 from forecastseal import Ledger, LedgerError
@@ -183,3 +184,55 @@ def test_cli_roundtrip_and_interim_rules(tmp_path, capsys):
     main(["--dir", d, "calibration"])
     main(["--dir", d, "power", "--sd", "0.085", "--delta", "0.004"])
     assert "events needed" in capsys.readouterr().out
+
+
+def _big_writer(args):
+    root, h, k = args
+    l = Ledger(root)
+    pad = "x" * 3000                                          # long lines are more likely to be seen half-written
+    for i in range(25):
+        l.predict(f"b{k}-{i}", h, "me", {"yes": 0.5, "no": 0.5}, meta={"pad": pad})
+
+
+def _reader(args):
+    root, n = args
+    l = Ledger(root)
+    for _ in range(n):
+        l.entries()                                           # must never see a half-written line
+
+
+def test_readers_never_see_a_half_written_line_while_others_write(led):
+    h = sealed(led)
+    ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context()
+    with ctx.Pool(8) as pool:
+        w = [pool.apply_async(_big_writer, ((str(led.root), h, k),)) for k in range(4)]
+        r = [pool.apply_async(_reader, ((str(led.root), 400),)) for _ in range(4)]
+        for x in w + r:
+            x.get(timeout=300)
+    assert led.verify() == [] and led.status()["predictions"] == 100
+
+
+def _slow_partial_write(args):
+    root, started, line = args
+    l = Ledger(root)
+    half = len(line) // 2
+    with l._lock():                                           # a writer in the middle of appending
+        with l.path.open("a", encoding="utf-8") as fh:
+            fh.write(line[:half]); fh.flush()
+            started.set()
+            time.sleep(0.6)
+            fh.write(line[half:] + "\n"); fh.flush()
+
+
+def test_a_reader_waits_for_a_writer_that_is_halfway_through_a_line(led):
+    h = sealed(led)
+    good = led._chain(led.entries(), [("analysis", {"protocol": h, "kind": "interim", "what": "probe", "n_resolved": 0})], None)[0]
+    line = json.dumps(good, sort_keys=True)
+    ctx = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context()
+    started = ctx.Event()
+    p = ctx.Process(target=_slow_partial_write, args=((str(led.root), started, line),))
+    p.start()
+    assert started.wait(10)
+    entries = Ledger(led.root).entries()                      # must block until the line is complete, not fail
+    p.join()
+    assert len(entries) == 2 and led.verify() == []

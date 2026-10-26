@@ -64,7 +64,7 @@ fseal test A B                          # refused before n_target unless --inter
 fseal report -o report.html --compare A B
 ```
 
-`examples/synthetic_demo.py` builds a complete ledger and report from synthetic data.
+`examples/synthetic_demo.py` builds a complete ledger and report from synthetic data. `examples/noise_demo.py` shows why sealing matters: with no real effect anywhere, reporting the best of 20 metrics finds something "significant" in about two studies out of three (1 − 0.95²⁰ ≈ 64%), while one metric named in advance does so 5% of the time.
 
 ## Comparing versions of a system (measured values)
 

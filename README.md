@@ -61,7 +61,7 @@ It cannot make a bad evaluation good. It makes the process hard to bend unnotice
 
 ## A sample report
 
-`fseal report` writes one self-contained HTML file: the sealed plan, scores, comparisons with their roles (primary or exploratory), a timeline of every look, and the log. This one is built from synthetic data by `python examples/sample_report.py` ([open the file](docs/sample-report.html) in a browser):
+`fseal report` writes one self-contained HTML file: the sealed plan, scores, comparisons with their roles (primary or exploratory), a timeline of every look, and the log. This one is built from synthetic data by `python examples/sample_report.py` ([open the live page](https://as-we.github.io/forecastseal/sample-report.html), or the [file](docs/sample-report.html) in a browser):
 
 ![Top of the sample report: ledger status, progress, sealed protocol, summary table.](docs/images/report-sample.png)
 
@@ -158,7 +158,7 @@ Verdict: not enough data. Even all 300 items would be 53% of what the final test
 
 If there is not enough data, the honest options are to collect more going forward (prospectively), to accept a larger smallest difference, or to treat every result as a hint and say so.
 
-[`docs/plan-calculator.html`](docs/plan-calculator.html) is the same calculation as a single offline page (English and Japanese, no network, no install): open it in a browser.
+[`docs/plan-calculator.html`](docs/plan-calculator.html) is the same calculation as a single offline page (English and Japanese, no network, no install). Use it online at [as-we.github.io/forecastseal/plan-calculator.html](https://as-we.github.io/forecastseal/plan-calculator.html), or open the file in a browser.
 
 ## Reading the statistics honestly
 

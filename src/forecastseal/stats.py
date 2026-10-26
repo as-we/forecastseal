@@ -75,8 +75,11 @@ def bootstrap_ci(values: list[float], level: float, n_boot: int = 2000, seed: in
 
 
 def compare(rows: list[dict], metric: str, a: str, b: str, alpha: float, n_comparisons: int = 1, seed: int = 43,
-            n_boot: int = 2000, higher_is_better: bool = False) -> dict:
-    """Difference is always a minus b. ``better`` says which one the sign favours (None if the interval includes 0)."""
+            n_boot: int = 2000, higher_is_better: bool = False, margin: float | None = None) -> dict:
+    """Difference is always a minus b. ``better`` says which one the sign favours (None if the interval includes 0).
+
+    ``margin`` (> 0) asks a different question: is a *not worse than b by more than the margin*? The margin must be
+    chosen before looking (seal it in the protocol). Non-inferior when the interval bound facing the margin clears it."""
     d = paired_diffs(rows, metric, a, b)
     alpha_adj = alpha / n_comparisons
     lo, hi = bootstrap_ci(d, 1 - alpha_adj, n_boot, seed)
@@ -86,8 +89,13 @@ def compare(rows: list[dict], metric: str, a: str, b: str, alpha: float, n_compa
     if excl:
         a_wins = (m > 0) if higher_is_better else (m < 0)
         better = a if a_wins else b
+    ni = None
+    if margin is not None and len(d) > 1:
+        # a is not worse than b by more than `margin`: the bound of the same interval that faces the margin must clear it
+        ni = (lo > -margin) if higher_is_better else (hi < margin)
     return {"n": len(d), "mean_diff": m, "sd": stdev(d) if len(d) > 1 else float("nan"), "alpha_adj": alpha_adj,
-            "ci": (lo, hi), "excludes_zero": excl, "better": better, "higher_is_better": higher_is_better}
+            "ci": (lo, hi), "excludes_zero": excl, "better": better, "higher_is_better": higher_is_better,
+            "margin": margin, "non_inferior": ni}
 
 
 def calibration(rows: list[dict], bins: int = 10) -> dict:
@@ -127,3 +135,64 @@ def min_detectable(n: int, sd: float, alpha: float, target_power: float = 0.8, t
     za = _N.inv_cdf(1 - alpha / (2 if two_sided else 1))
     zb = _N.inv_cdf(target_power)
     return (za + zb) * sd / math.sqrt(n)
+
+
+# ---------------- agreement between two raters ----------------
+def _labels(a: list[float], b: list[float]) -> list[float]:
+    return sorted(set(a) | set(b))
+
+
+def _weight(x: float, y: float, rng: float, kind: str) -> float:
+    if kind == "none" or rng == 0:
+        return 1.0 if x == y else 0.0
+    d = abs(x - y) / rng
+    return 1.0 - (d if kind == "linear" else d * d)
+
+
+def cohen_kappa(a: list[float], b: list[float], weights: str = "none") -> float:
+    """Cohen's kappa for two raters on the same items; weights: none | linear | quadratic (ordinal labels)."""
+    if weights not in ("none", "linear", "quadratic"):
+        raise ValueError("weights must be none, linear or quadratic")
+    n = len(a)
+    if n == 0 or n != len(b):
+        raise ValueError("need the same, non-zero number of labels from both raters")
+    labs = _labels(a, b)
+    rng = labs[-1] - labs[0]
+    pa = {l: sum(1 for x in a if x == l) / n for l in labs}
+    pb = {l: sum(1 for x in b if x == l) / n for l in labs}
+    po = sum(_weight(x, y, rng, weights) for x, y in zip(a, b)) / n
+    pe = sum(_weight(i, j, rng, weights) * pa[i] * pb[j] for i in labs for j in labs)
+    return float("nan") if pe >= 1.0 - 1e-12 else (po - pe) / (1 - pe)
+
+
+def gwet_ac1(a: list[float], b: list[float]) -> float:
+    """Gwet's AC1 (unweighted): less sensitive than kappa when one label is very common."""
+    n = len(a)
+    labs = _labels(a, b)
+    q = len(labs)
+    if q < 2:
+        return float("nan")
+    po = sum(1 for x, y in zip(a, b) if x == y) / n
+    pi = {l: (sum(1 for x in a if x == l) + sum(1 for y in b if y == l)) / (2 * n) for l in labs}
+    pe = sum(v * (1 - v) for v in pi.values()) / (q - 1)
+    return float("nan") if pe >= 1.0 - 1e-12 else (po - pe) / (1 - pe)
+
+
+def agreement(a: list[float], b: list[float], weights: str = "none", n_boot: int = 2000, seed: int = 43, level: float = 0.95) -> dict:
+    """Agreement of two raters: observed agreement, kappa with a bootstrap interval over items, AC1, confusion counts."""
+    n = len(a)
+    k = cohen_kappa(a, b, weights)
+    rng = random.Random(seed)  # nosec B311 - reproducible resampling, not a security use
+    ks = []
+    for _ in range(n_boot):
+        idx = [rng.randrange(n) for _ in range(n)]
+        v = cohen_kappa([a[i] for i in idx], [b[i] for i in idx], weights)
+        if not math.isnan(v):
+            ks.append(v)
+    ks.sort()
+    lo, hi = ((ks[int(((1 - level) / 2) * len(ks))], ks[min(len(ks) - 1, int((1 - (1 - level) / 2) * len(ks)))]) if len(ks) > 20 else (float("nan"), float("nan")))
+    labs = _labels(a, b)
+    conf = {(x, y): sum(1 for p, q in zip(a, b) if p == x and q == y) for x in labs for y in labs}
+    share = max(max(sum(1 for v in a if v == l), sum(1 for v in b if v == l)) for l in labs) / n
+    return {"n": n, "observed": sum(1 for x, y in zip(a, b) if x == y) / n, "kappa": k, "ci": (lo, hi), "weights": weights,
+            "ac1": gwet_ac1(a, b), "labels": labs, "confusion": conf, "top_label_share": share}

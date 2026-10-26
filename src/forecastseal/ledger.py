@@ -76,10 +76,10 @@ def clean_text(value, what: str) -> str:
 def protocol_metrics(protocol: dict) -> list[dict]:
     """The metrics a protocol defines, as [{"name", "direction", "primary"}]. A single-metric protocol has one primary metric."""
     if protocol.get("kind", "forecast") == "forecast":
-        return [{"name": protocol["metric"], "direction": "lower_is_better", "primary": True}]
+        return [{"name": protocol["metric"], "direction": "lower_is_better", "primary": True, "margin": protocol.get("margin")}]
     if "metrics" in protocol:
-        return [{"name": m["name"], "direction": m["direction"], "primary": bool(m.get("primary", False))} for m in protocol["metrics"]]
-    return [{"name": protocol["metric"], "direction": protocol["direction"], "primary": True}]
+        return [{"name": m["name"], "direction": m["direction"], "primary": bool(m.get("primary", False)), "margin": m.get("margin")} for m in protocol["metrics"]]
+    return [{"name": protocol["metric"], "direction": protocol["direction"], "primary": True, "margin": protocol.get("margin")}]
 
 
 def _is_number(v) -> bool:
@@ -149,19 +149,32 @@ class Ledger:
         es = self.entries()
         return es[-1]["hash"] if es else GENESIS
 
-    def _append(self, etype: str, body: dict, now: str | None = None) -> dict:
-        with self._lock():
-            es = self.entries()
-            seq = len(es) + 1
-            prev = es[-1]["hash"] if es else GENESIS
+    @staticmethod
+    def _chain(es: list[dict], items: list[tuple[str, dict]], now: str | None) -> list[dict]:
+        """Build new entries that continue the chain after ``es``."""
+        out = []
+        prev = es[-1]["hash"] if es else GENESIS
+        seq = len(es)
+        for etype, body in items:
+            seq += 1
             ts = now or _now()
             e = {"seq": seq, "type": etype, "ts": ts, "prev": prev, "body": body, "hash": entry_hash(seq, etype, ts, prev, body)}
-            line = json.dumps(e, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
-            with self.path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
-                fh.flush()
-                os.fsync(fh.fileno())
-        return e
+            out.append(e)
+            prev = e["hash"]
+        return out
+
+    def _write(self, new: list[dict]) -> None:
+        lines = "".join(json.dumps(e, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n" for e in new)
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(lines)
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    def _append(self, etype: str, body: dict, now: str | None = None) -> dict:
+        with self._lock():
+            new = self._chain(self.entries(), [(etype, body)], now)
+            self._write(new)
+        return new[0]
 
     # ---------- commands ----------
     @staticmethod
@@ -200,6 +213,8 @@ class Ledger:
                     raise LedgerError(f"metric {m.get('name')!r} needs direction: one of {DIRECTIONS}")
                 if "primary" in m and not isinstance(m["primary"], bool):
                     raise LedgerError("primary must be true or false")
+                if "margin" in m and not (_is_number(m["margin"]) and m["margin"] > 0):
+                    raise LedgerError("margin must be a number greater than 0")
             if len(set(names)) != len(names):
                 raise LedgerError("metric names must be unique")
             if not any(m.get("primary") for m in ms):
@@ -208,6 +223,8 @@ class Ledger:
             clean_text(protocol.get("metric"), "metric")
             if protocol.get("direction") not in DIRECTIONS:
                 raise LedgerError(f"a measure protocol needs direction: one of {DIRECTIONS}")
+        if "margin" in protocol and not (_is_number(protocol["margin"]) and protocol["margin"] > 0):
+            raise LedgerError("margin must be a number greater than 0")
         n = protocol["n_target"]
         if not (isinstance(n, int) and not isinstance(n, bool) and n > 0):
             raise LedgerError("n_target must be a positive integer")
@@ -296,6 +313,57 @@ class Ledger:
                 raise LedgerError("meta must be a small JSON object")
             body["meta"] = meta
         return self._append("measurement", body, now)
+
+    def measure_many(self, protocol_hash: str, rows: list[dict], skip_existing: bool = False, now: str | None = None) -> dict:
+        """Record many measurements in one step: all rows are checked first and nothing is written if any is invalid.
+
+        Each row: {"item", "system", "value", optional "metric", optional "meta"}. Returns {"added", "skipped"}.
+        """
+        with self._lock():
+            es = self.entries()
+            protos = {e["hash"]: e for e in es if e["type"] == "protocol"}
+            if protocol_hash not in protos:
+                raise LedgerError("unknown protocol hash; register the protocol before measuring")
+            proto = protos[protocol_hash]["body"]["protocol"]
+            if proto.get("kind", "forecast") != "measure":
+                raise LedgerError("this protocol is a forecast protocol; use predict(), not measure()")
+            multi = len(protocol_metrics(proto)) > 1
+            seen = {(e["body"]["item"], e["body"]["system"], e["body"].get("metric")) for e in es
+                    if e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash}
+            items, errors, skipped = [], [], 0
+            for n, r in enumerate(rows, 1):
+                try:
+                    if not isinstance(r, dict):
+                        raise LedgerError("row is not an object")
+                    item, system = clean_text(r.get("item"), "item"), clean_text(r.get("system"), "system")
+                    metric = self._metric_name(proto, r.get("metric"))
+                    if not _is_number(r.get("value")):
+                        raise LedgerError("value must be a finite number")
+                    key = (item, system, metric if multi else None)
+                    if key in seen:
+                        if skip_existing:
+                            skipped += 1
+                            continue
+                        raise LedgerError(f"{system!r} already has a value for item {item!r} on {metric!r}")
+                    seen.add(key)
+                    body = {"id": f"{system}::{item}" + (f"::{metric}" if multi else ""), "item": item, "system": system,
+                            "protocol": protocol_hash, "value": r["value"]}
+                    if multi:
+                        body["metric"] = metric
+                    meta = r.get("meta")
+                    if meta is not None:
+                        if not isinstance(meta, dict) or len(canonical(meta)) > MAX_META_BYTES:
+                            raise LedgerError("meta must be a small JSON object")
+                        body["meta"] = meta
+                    items.append(("measurement", body))
+                except LedgerError as ex:
+                    errors.append(f"row {n}: {ex}")
+            if errors:
+                more = f" (+{len(errors) - 5} more)" if len(errors) > 5 else ""
+                raise LedgerError("nothing was written. " + "; ".join(errors[:5]) + more)
+            if items:
+                self._write(self._chain(es, items, now))
+        return {"added": len(items), "skipped": skipped}
 
     def measured_items(self, protocol_hash: str, metric: str | None = None) -> list[dict]:
         """One row per measurement of one metric, shaped like resolved_items() rows."""

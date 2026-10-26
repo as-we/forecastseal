@@ -148,6 +148,9 @@ def _metric_block(led: Ledger, h: str, proto: dict, m: dict, multi: bool, compar
             extra = ""
             if r["final"] and r["prior_final"] >= r["planned"]:
                 extra = f'<div class="note">This is final analysis #{r["prior_final"] + 1} for this metric, but the protocol planned {r["planned"]} comparison(s). Treat the interval as too narrow.</div>'
+            if r.get("margin") is not None and r["n"] > 1:
+                extra += (f'<div class="note">Non-inferiority (margin {esc(r["margin"])}, sealed in the protocol): {esc(r["a"])} is not worse than {esc(r["b"])} by more than the margin: '
+                          f'<b>{"yes" if r["non_inferior"] else "not shown"}</b>' + ("" if r["final"] else " (interim, not a verdict)") + '.</div>')
             if multi and not r["primary"]:
                 extra += '<div class="note">Exploratory metric: no multiplicity adjustment. Do not draw conclusions from it.</div>'
             if r["n"] < 30:

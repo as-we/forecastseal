@@ -82,19 +82,60 @@ def cmd_predict(args):
 def cmd_measure(args):
     led = _ledger(args)
     if args.file:
-        n = 0
         h = _protocol_hash(led, args)
+        rows = []
         for line in Path(args.file).read_text(encoding="utf-8").splitlines():
             if line.strip():
                 r = loads(line)
-                led.measure(r["item"], r["system"], r["value"], h, metric=r.get("metric", args.metric), meta=r.get("meta"))
-                n += 1
-        print(f"appended {n} measurements")
+                if args.metric and "metric" not in r:
+                    r["metric"] = args.metric
+                rows.append(r)
+        res = led.measure_many(h, rows, skip_existing=args.skip_existing)
+        print(f"appended {res['added']} measurements" + (f" ({res['skipped']} already recorded, skipped)" if res["skipped"] else ""))
     else:
         if not (args.item and args.system and args.value is not None):
             raise LedgerError("give --item, --system and --value, or --file")
         led.measure(args.item, args.system, args.value, _protocol_hash(led, args), metric=args.metric)
         print(f"recorded {args.system} on {args.item}: {args.value}")
+
+
+def cmd_import_csv(args):
+    import csv
+    led = _ledger(args)
+    h = _protocol_hash(led, args)
+    names = [m["name"] for m in workflow.metrics_of(led, h)]
+    rows = []
+    with open(args.csv_file, encoding="utf-8-sig", newline="") as fh:
+        rd = csv.DictReader(fh)
+        cols = rd.fieldnames or []
+        need = [args.item_col, args.system_col] + ([] if args.wide else [args.value_col])
+        missing = [c for c in need if c not in cols]
+        if missing:
+            raise LedgerError(f"CSV is missing column(s) {missing}; found {cols}")
+        if args.wide:
+            metric_cols = [c for c in cols if c not in (args.item_col, args.system_col)]
+            unknown = [c for c in metric_cols if c not in names]
+            if unknown:
+                raise LedgerError(f"column(s) {unknown} are not metrics of this protocol {names}")
+        for n, rec in enumerate(rd, 2):
+            if args.wide:
+                for c in metric_cols:
+                    if (rec.get(c) or "").strip():
+                        rows.append({"item": rec[args.item_col], "system": rec[args.system_col], "metric": c, "value": _num(rec[c], n, c)})
+            else:
+                r = {"item": rec[args.item_col], "system": rec[args.system_col], "value": _num(rec[args.value_col], n, args.value_col)}
+                if args.metric_col in cols and (rec.get(args.metric_col) or "").strip():
+                    r["metric"] = rec[args.metric_col]
+                rows.append(r)
+    res = led.measure_many(h, rows, skip_existing=args.skip_existing)
+    print(f"imported {res['added']} values" + (f" ({res['skipped']} already recorded, skipped)" if res["skipped"] else ""))
+
+
+def _num(s, line, col):
+    try:
+        return float(s)
+    except (TypeError, ValueError) as e:
+        raise LedgerError(f"line {line}, column {col!r}: {s!r} is not a number") from e
 
 
 def cmd_resolve(args):
@@ -161,6 +202,10 @@ def _print_comparison(res: dict) -> None:
     print(f"{a} vs {b}  ({res['metric']}{role}; difference = {a} minus {b}; {sign})")
     print(f"  paired items: {res['n']}   mean difference: {res['mean_diff']:+.4f}   sd: {res['sd']:.4f}")
     print(f"  {100 * (1 - res['alpha_adj']):.2f}% interval (alpha {res['alpha']} / {res['family']} in the confirmatory family): [{lo:+.4f}, {hi:+.4f}]")
+    if res["margin"] is not None and res["n"] > 1:
+        word = "yes" if res["non_inferior"] else "not shown"
+        print(f"  non-inferiority (margin {res['margin']}, sealed in the protocol): {a} is not worse than {b} by more than the margin: {word}"
+              + ("" if res["final"] else " [interim, not a verdict]"))
     if res["n"] < 30:
         print("  warning: fewer than 30 paired items; intervals are unreliable at this size")
     if not res["final"]:
@@ -189,6 +234,42 @@ def cmd_report(args):
     out = Path(args.output)
     out.write_text(page, encoding="utf-8")
     print(f"wrote {out} ({len(page) // 1024} KB, self-contained: no scripts, no external requests)")
+
+
+def cmd_agreement(args):
+    led = _ledger(args)
+    h = _protocol_hash(led, args)
+    m = workflow.pick_metric(led, h, args.metric)
+    rows = led.items_for(h, m["name"])
+    by: dict[str, dict[str, float]] = {}
+    for r in rows:
+        by.setdefault(r["forecaster"], {})[r["event"]] = r["value"]
+    for who in (args.a, args.b):
+        if who not in by:
+            raise LedgerError(f"unknown rater {who!r}; known: {sorted(by)}")
+    shared = sorted(set(by[args.a]) & set(by[args.b]))
+    if len(shared) < 2:
+        raise LedgerError("need at least two items rated by both")
+    va, vb = [by[args.a][i] for i in shared], [by[args.b][i] for i in shared]
+    if any(x != int(x) for x in va + vb):
+        raise LedgerError("agreement needs integer labels (for example 0/1 or 1-5); these values are not integers")
+    res = stats.agreement(va, vb, weights=args.weights, seed=args.seed)
+    led.log_analysis(h, "agreement", f"agreement {args.a} vs {args.b}", res["n"], metric=m["name"] if len(workflow.metrics_of(led, h)) > 1 else None)
+    lo, hi = res["ci"]
+    print(f"agreement {args.a} vs {args.b} on {res['n']} items ({m['name']}, weights: {res['weights']})")
+    print(f"  observed agreement: {100 * res['observed']:.1f}%")
+    print(f"  Cohen's kappa: {res['kappa']:.3f}   95% interval [{lo:.3f}, {hi:.3f}]")
+    print(f"  Gwet's AC1 (unweighted): {res['ac1']:.3f}   (steadier than kappa when one label dominates)")
+    labs = res["labels"]
+    print("  confusion (rows = " + args.a + ", columns = " + args.b + "):")
+    print("        " + " ".join(f"{int(l):>5d}" for l in labs))
+    for x in labs:
+        print(f"  {int(x):>5d} " + " ".join(f"{res['confusion'][(x, y)]:>5d}" for y in labs))
+    if res["top_label_share"] > 0.9:
+        print(f"  warning: one label covers {100 * res['top_label_share']:.0f}% of the ratings; kappa is unstable in that case. Read AC1 and the confusion table.")
+    if res["n"] < 30:
+        print("  warning: fewer than 30 items; the interval is wide and unreliable")
+    print("  kappa thresholds in the literature are conventions, not rules; decide the acceptable level before looking.")
 
 
 def cmd_power(args):
@@ -238,6 +319,11 @@ def main(argv=None):
     s.add_argument("--file", help='JSONL lines like {"item": "doc-1", "system": "v2", "value": 0.83}')
     s.add_argument("--item"); s.add_argument("--system"); s.add_argument("--value", type=float); s.add_argument("--protocol")
     s.add_argument("--metric", help="required when the protocol defines several metrics (a JSONL line may carry its own \"metric\")")
+    s.add_argument("--skip-existing", action="store_true", help="with --file: ignore values that are already recorded (safe to re-run)")
+    s = add("import-csv", cmd_import_csv, "import measured values from a CSV file")
+    s.add_argument("csv_file"); s.add_argument("--protocol"); s.add_argument("--wide", action="store_true", help="columns after item/system are metrics (blank cells skipped)")
+    s.add_argument("--item-col", default="item"); s.add_argument("--system-col", default="system"); s.add_argument("--value-col", default="value"); s.add_argument("--metric-col", default="metric")
+    s.add_argument("--skip-existing", action="store_true", help="ignore values that are already recorded (safe to re-run)")
     s = add("resolve", cmd_resolve, "record the outcome of an event"); s.add_argument("event"); s.add_argument("outcome")
     s = add("verify", cmd_verify, "check the hash chain"); s.add_argument("--expected-head", help="a head hash you saved or timestamped earlier")
     s.add_argument("--manifest", help="re-check an item list against the sealed manifest and the recorded items")
@@ -252,6 +338,9 @@ def main(argv=None):
     s.add_argument("-o", "--output", default="report.html"); s.add_argument("--protocol"); s.add_argument("--seed", type=int, default=43)
     s.add_argument("--compare", nargs=2, action="append", metavar=("A", "B"), help="add a paired comparison (repeatable); logged like `test`")
     s.add_argument("--interim", action="store_true")
+    s = add("agreement", cmd_agreement, "agreement (Cohen's kappa, AC1) between two raters on the same items")
+    s.add_argument("a"); s.add_argument("b"); s.add_argument("--protocol"); s.add_argument("--metric")
+    s.add_argument("--weights", choices=["none", "linear", "quadratic"], default="none"); s.add_argument("--seed", type=int, default=43)
     s = add("power", cmd_power, "how many events are needed to detect a difference")
     s.add_argument("--sd", type=float); s.add_argument("--delta", type=float); s.add_argument("--n", type=int)
     s.add_argument("--alpha", type=float, default=0.05); s.add_argument("--n-comparisons", type=int, default=1)

@@ -51,7 +51,7 @@ def compare_logged(led: Ledger, protocol_hash: str, a: str, b: str, interim: boo
     hib = m["direction"] == "higher_is_better"
     fam = family_size(proto, m)
     try:
-        res = stats.compare(rows, m["name"], a, b, proto["alpha"], fam, seed=seed, higher_is_better=hib)
+        res = stats.compare(rows, m["name"], a, b, proto["alpha"], fam, seed=seed, higher_is_better=hib, margin=m.get("margin"))
     except ValueError as e:
         raise LedgerError(str(e)) from e
     final = res["n"] >= proto["n_target"]

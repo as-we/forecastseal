@@ -2,7 +2,7 @@
 
 Seal your analysis plan before the outcome is known, append forecasts to a tamper-evident ledger, then score and test them honestly.
 
-> **Status: pre-alpha (v0.0.6).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
+> **Status: pre-alpha (v0.0.7).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
 > Also working: continuous-valued measurements for comparing versions of a system on the same items. Planned: optional OpenTimestamps anchoring.
 
 ## Why
@@ -81,6 +81,37 @@ Real evaluations have more than one number. Declare them all in one sealed proto
 - **Exploratory** metrics get no adjustment and are labelled as such in the output and the report. They suggest what to test next; they do not support conclusions.
 - `fseal measure --metric errors ...` (or a `"metric"` field per JSONL line), `fseal score`, `fseal test A B` (all metrics at once, or `--metric`) and `fseal report` handle them together. The report starts with a summary table.
 - Looks are counted per metric. A protocol with a single `metric` still works as before.
+
+## Is the cheaper version as good? (non-inferiority)
+
+"Not significantly different" is not the same as "as good". To ask whether A is **not worse than B by more than a margin**, seal the margin in the protocol (in the metric's own units, chosen before looking):
+
+```json
+{"name": "cheaper-model", "kind": "measure", "metric": "quality", "direction": "higher_is_better",
+ "n_target": 100, "alpha": 0.05, "margin": 0.03}
+```
+
+`fseal test cheap big` then also prints whether the interval clears the margin. The margin goes with a single `metric`, or with each entry of `metrics`. Picking the margin after seeing the data defeats the purpose; the ledger records when it was sealed.
+
+## Checking a judge against people (agreement)
+
+Record each rater's integer labels as measurements, with the rater as the system (`human`, `llm-judge`), then:
+
+```bash
+fseal agreement human llm-judge --weights quadratic   # none | linear | quadratic (for ordered labels)
+```
+
+It prints observed agreement, Cohen's kappa with a bootstrap interval, Gwet's AC1 (steadier when one label dominates) and the confusion table. Decide the acceptable level before looking: published thresholds are conventions, not rules. The look is logged like any other.
+
+## Importing results from other tools
+
+```bash
+fseal import-csv scores.csv --protocol <hash>            # long: item,system,metric,value
+fseal import-csv scores.csv --wide --protocol <hash>     # wide: item,system, then one column per metric (blank = skip)
+fseal measure --file scores.jsonl --skip-existing        # JSONL; safe to re-run
+```
+
+An import is all-or-nothing: if any row is invalid, nothing is written and the message names the rows.
 
 ## Sealing the evaluation set
 

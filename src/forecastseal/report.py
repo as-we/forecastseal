@@ -124,6 +124,8 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
     st = led.status()
     gen = now or dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
+    man = led.protocols()[protocol_hash]["body"].get("manifest")
+    manifest_row = (f'<tr><th>Sealed item set</th><td>{esc(man["count"])} items · <span class="mono">{esc(man["sha256"])}</span></td></tr>' if man else "")
     parts: list[str] = []
     ok = not problems
     parts.append(f'<header><h1>{esc(proto["name"])}</h1><p class="muted">forecastseal report · metric: {esc(metric)} ({esc(workflow.direction_text(proto))}) · generated {esc(gen)}</p></header>')
@@ -140,7 +142,7 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
                  f'<tr><th>Name</th><td>{esc(proto["name"])}</td></tr><tr><th>Metric</th><td>{esc(metric)}</td></tr>'
                  f'<tr><th>Planned {unit.lower()}</th><td>{esc(proto["n_target"])}</td></tr><tr><th>Alpha</th><td>{esc(proto["alpha"])}</td></tr>'
                  f'<tr><th>Planned comparisons</th><td>{esc(proto.get("n_comparisons", 1))}</td></tr>'
-                 f'<tr><th>Protocol hash</th><td class="mono">{esc(protocol_hash)}</td></tr></tbody></table></div></section>')
+                 f'{manifest_row}<tr><th>Protocol hash</th><td class="mono">{esc(protocol_hash)}</td></tr></tbody></table></div></section>')
 
     if losses:
         items = []

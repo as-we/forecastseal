@@ -155,7 +155,19 @@ class Ledger:
         return e
 
     # ---------- commands ----------
-    def register(self, protocol: dict, source_bytes: bytes | None = None, now: str | None = None) -> dict:
+    @staticmethod
+    def manifest_of(ids: list[str]) -> dict:
+        """Hash of a set of item ids (sorted, one per line). The same set always gives the same hash."""
+        if not isinstance(ids, (list, tuple)) or not ids:
+            raise LedgerError("a manifest needs at least one item id")
+        cleaned = [clean_text(i, "manifest item id") for i in ids]
+        if len(set(cleaned)) != len(cleaned):
+            raise LedgerError("manifest has duplicate item ids")
+        digest = hashlib.sha256("\n".join(sorted(cleaned)).encode("utf-8")).hexdigest()
+        return {"sha256": digest, "count": len(cleaned)}
+
+    def register(self, protocol: dict, source_bytes: bytes | None = None, now: str | None = None,
+                 manifest_ids: list[str] | None = None) -> dict:
         if not isinstance(protocol, dict):
             raise LedgerError("protocol must be a JSON object")
         missing = [k for k in PROTOCOL_REQUIRED if k not in protocol]
@@ -185,6 +197,10 @@ class Ledger:
         body = {"protocol": protocol}
         if source_bytes is not None:
             body["source_sha256"] = hashlib.sha256(source_bytes).hexdigest()
+        if manifest_ids is not None:
+            body["manifest"] = self.manifest_of(manifest_ids)
+            if protocol["n_target"] > body["manifest"]["count"]:
+                raise LedgerError(f"n_target ({protocol['n_target']}) is larger than the manifest ({body['manifest']['count']} items)")
         return self._append("protocol", body, now)
 
     def protocols(self) -> dict[str, dict]:
@@ -280,6 +296,26 @@ class Ledger:
             if e["type"] == "prediction" and b["protocol"] == protocol_hash and b["event"] in outs:
                 rows.append({"id": b["id"], "event": b["event"], "forecaster": b["forecaster"], "probs": b["probs"], "outcome": outs[b["event"]]})
         return rows
+
+    def check_manifest(self, ids: list[str]) -> list[str]:
+        """Check a manifest file's ids against the sealed manifest(s) and against what was recorded.
+
+        Problems: the set does not match any sealed manifest, or an item was recorded that is not in the set.
+        (Items in the set that are not recorded yet are normal and not reported as problems.)
+        """
+        m = self.manifest_of(ids)
+        want = set(ids)
+        matches = [h for h, e in self.protocols().items() if (e["body"].get("manifest") or {}).get("sha256") == m["sha256"]]
+        if not matches:
+            return ["no protocol was sealed with this manifest (the item set differs from the sealed one)"]
+        problems = []
+        for e in self.entries():
+            b = e["body"]
+            if e["type"] == "measurement" and b["protocol"] in matches and b["item"] not in want:
+                problems.append(f"entry {e['seq']}: item {b['item']!r} was recorded but is not in the sealed manifest")
+            if e["type"] == "prediction" and b["protocol"] in matches and b["event"] not in want:
+                problems.append(f"entry {e['seq']}: event {b['event']!r} was predicted but is not in the sealed manifest")
+        return problems
 
     # ---------- verification ----------
     def verify(self, expected_head: str | None = None) -> list[str]:

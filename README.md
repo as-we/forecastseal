@@ -2,7 +2,7 @@
 
 Seal your analysis plan before the outcome is known, append forecasts to a tamper-evident ledger, then score and test them honestly.
 
-> **Status: pre-alpha (v0.0.4).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
+> **Status: pre-alpha (v0.0.5).** Working: the ledger (`init`, `register`, `predict`, `resolve`, `verify`), scoring (`score`, `calibration`), paired comparison with an interval (`test`), power planning (`power`) and a self-contained HTML report (`report`).
 > Also working: continuous-valued measurements for comparing versions of a system on the same items. Planned: optional OpenTimestamps anchoring.
 
 ## Why
@@ -64,6 +64,17 @@ fseal report -o report.html --compare v2 v1
 ```
 
 A re-run of a system on an item is a new system name (`v2-run2`): measurements are append-only. `examples/prompt_versions_demo.py` shows the whole flow with synthetic scores. The scores themselves come from whatever scorer you trust; `forecastseal` does not judge them, it keeps the comparison honest.
+
+## Sealing the evaluation set
+
+Choosing which items to evaluate after seeing results is as bad as choosing the metric afterwards. Seal the list of item ids with the protocol:
+
+```bash
+fseal register protocol.json --manifest test_items.txt   # one id per line, or a JSON array
+fseal verify --manifest test_items.txt                   # later: same set? anything recorded outside it?
+```
+
+Only the hash and the count are stored, never the items themselves, so the ledger stays small and the list can stay private. `n_target` cannot exceed the number of sealed items. Keep a separate development set for tuning; the sealed set is for the final comparison.
 
 ## Reading the statistics honestly
 - Intervals are percentile bootstrap intervals over events. With fewer than a few hundred events they can be too narrow ([Position: Don't Use the CLT in LLM Evals With Fewer Than a Few Hundred Datapoints](https://arxiv.org/pdf/2503.01747)); `test` warns below 30 events.

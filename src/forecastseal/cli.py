@@ -35,14 +35,31 @@ def cmd_init(args):
     print(f"initialised {args.dir}/ledger.jsonl")
 
 
+def _read_ids(path: str) -> list[str]:
+    """One item id per line, or a JSON array of strings."""
+    text = Path(path).read_text(encoding="utf-8")
+    if text.lstrip().startswith("["):
+        try:
+            ids = loads(text)
+        except ValueError as e:
+            raise LedgerError(f"manifest is not valid JSON: {e}") from e
+        if not all(isinstance(i, str) for i in ids):
+            raise LedgerError("a JSON manifest must be an array of strings")
+        return ids
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
 def cmd_register(args):
     raw = Path(args.protocol_file).read_bytes()
     try:
         data = loads(raw.decode("utf-8"))
     except ValueError as e:
         raise LedgerError(f"protocol file is not valid JSON: {e}") from e
-    e = _ledger(args).register(data, source_bytes=raw)
+    ids = _read_ids(args.manifest) if args.manifest else None
+    e = _ledger(args).register(data, source_bytes=raw, manifest_ids=ids)
     print(f"sealed protocol {e['body']['protocol']['name']!r}\nprotocol hash: {e['hash']}")
+    if ids is not None:
+        print(f"sealed item set: {e['body']['manifest']['count']} items, sha256 {e['body']['manifest']['sha256']}")
 
 
 def cmd_predict(args):
@@ -88,6 +105,8 @@ def cmd_resolve(args):
 def cmd_verify(args):
     led = _ledger(args)
     problems = led.verify(expected_head=args.expected_head)
+    if args.manifest:
+        problems += led.check_manifest(_read_ids(args.manifest))
     if problems:
         print("LEDGER BROKEN")
         for p in problems:
@@ -197,6 +216,7 @@ def main(argv=None):
 
     add("init", cmd_init, "create an empty ledger")
     s = add("register", cmd_register, "seal an analysis protocol (JSON file)"); s.add_argument("protocol_file")
+    s.add_argument("--manifest", help="file with the item ids to be evaluated (one per line, or a JSON array); its hash is sealed too")
     s = add("predict", cmd_predict, "append a prediction (or --file JSONL)")
     s.add_argument("--file"); s.add_argument("--id"); s.add_argument("--event"); s.add_argument("--protocol")
     s.add_argument("--forecaster", default="anon"); s.add_argument("--probs", help='JSON, e.g. \'{"yes":0.7,"no":0.3}\'')
@@ -205,6 +225,7 @@ def main(argv=None):
     s.add_argument("--item"); s.add_argument("--system"); s.add_argument("--value", type=float); s.add_argument("--protocol")
     s = add("resolve", cmd_resolve, "record the outcome of an event"); s.add_argument("event"); s.add_argument("outcome")
     s = add("verify", cmd_verify, "check the hash chain"); s.add_argument("--expected-head", help="a head hash you saved or timestamped earlier")
+    s.add_argument("--manifest", help="re-check an item list against the sealed manifest and the recorded items")
     add("status", cmd_status, "counts and head hash")
     add("head", cmd_head, "print the head hash (publish or timestamp it)")
     s = add("score", cmd_score, "mean loss per forecaster"); s.add_argument("--protocol")

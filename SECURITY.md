@@ -19,7 +19,7 @@ third-party runtime dependencies. It never uses `eval`, `pickle` or shell comman
 - The bootstrap uses Python's `random` (seeded, for reproducibility). It is not cryptographic and does not need to be.
 
 ## Checks run
-`bandit` (static analysis; one low-severity note on `random`, explained above), `pip-audit` (no dependencies), 40 tests including tamper, truncation, concurrency, hostile-input and report-injection cases.
+`bandit` (static analysis; one low-severity note on `random`, explained above), `pip-audit` (no dependencies), 45 tests including tamper, truncation, concurrency, hostile-input and report-injection cases.
 
 ## Reporting
 Please open a private security advisory on the repository, or an issue if it is not sensitive.

@@ -32,6 +32,10 @@ Many mistakes in forecasting and in evaluating models or prompts may come less f
 
 It is small (standard library only), runs locally and makes no network calls.
 
+## Not a new idea
+
+The pieces already have names. Sealing the plan before looking is [preregistration](https://cos.io/initiatives/prereg). Keeping data unseen, and not reusing it after looking, is a holdout (see [The reusable holdout](https://arxiv.org/abs/1506.02629), Dwork et al., 2015). Reporting the best of many tries is the multiple comparisons problem. `forecastseal` is a small way to apply these habits to everyday evaluation work and to make them checkable afterwards.
+
 ## Why now?
 
 Two things may have changed with LLMs. Trying one more analysis became almost free, so the number of paths taken through a dataset can grow without anyone noticing. And more people can now run an analysis, or evaluate a prompt or a model, without the habits statisticians built for exactly this situation: write the plan first, count what you tried, keep some data unseen.

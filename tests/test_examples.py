@@ -21,6 +21,18 @@ def test_noise_demo_shows_the_inflation_and_the_labels(tmp_path, capsys):
     assert "primary (declared before the data)" in out and "exploratory (found after looking)" in out and "intact" in out
 
 
+def test_stages_demo_keeps_explored_generators_out_of_the_confirm_stage(tmp_path, capsys):
+    m = load("stages_demo")
+    led, ex, cf = m.main(root=tmp_path / "ledger", out=tmp_path / "r.html")
+    out = capsys.readouterr().out
+    assert "2 generator(s) already explored" in out and "generator 'gen-05' was already used" in out and "ledger: intact" in out
+    seen = {e["body"]["group"] for e in led.entries() if e["type"] == "measurement" and e["body"]["protocol"] == ex}
+    used = {e["body"]["group"] for e in led.entries() if e["type"] == "measurement" and e["body"]["protocol"] == cf}
+    assert seen and used and not (seen & used)
+    page = (tmp_path / "r.html").read_text()
+    assert "Sealed candidates" in page and "By condition (descriptive)" in page
+
+
 def test_peeking_demo_shows_inflated_false_alarms_and_exaggerated_estimates():
     m = load("peeking_demo")
     m.STUDIES = 600

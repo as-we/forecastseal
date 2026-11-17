@@ -35,6 +35,8 @@ METRICS = ("log_loss", "brier")
 KINDS = ("forecast", "measure")
 DIRECTIONS = ("lower_is_better", "higher_is_better")
 CLOSURE_KINDS = ("completed", "stopped_early", "abandoned")
+STAGES = ("explore", "validate", "confirm")
+STAGE_RANK = {s: i for i, s in enumerate(STAGES)}
 MAX_TEXT = 256
 MAX_META_BYTES = 10_000
 MAX_LINE_BYTES = 1_000_000
@@ -83,6 +85,44 @@ def protocol_metrics(protocol: dict) -> list[dict]:
     if "metrics" in protocol:
         return [{"name": m["name"], "direction": m["direction"], "primary": bool(m.get("primary", False)), "margin": m.get("margin")} for m in protocol["metrics"]]
     return [{"name": protocol["metric"], "direction": protocol["direction"], "primary": True, "margin": protocol.get("margin")}]
+
+
+def after_of(protocol: dict) -> list[str]:
+    """The earlier stages a protocol follows (``"after"`` may be one hash or a list)."""
+    a = protocol.get("after")
+    if a is None:
+        return []
+    return [a] if isinstance(a, str) else list(a)
+
+
+def stage_family(protos: dict[str, dict], roots: list[str]) -> set[str]:
+    """All protocols linked to ``roots`` through ``after`` (in either direction): one chain of stages.
+
+    Within a family each item, and each group, may be used by one protocol only.
+    """
+    links: dict[str, set[str]] = {}
+    for h, e in protos.items():
+        for a in after_of(e["body"]["protocol"]):
+            links.setdefault(h, set()).add(a)
+            links.setdefault(a, set()).add(h)
+    seen, todo = set(), list(roots)
+    while todo:
+        h = todo.pop()
+        if h in seen:
+            continue
+        seen.add(h)
+        todo.extend(links.get(h, ()))
+    return seen
+
+
+def _record_keys(e: dict) -> tuple[str | None, str | None, str | None]:
+    """(protocol, item, group) of a measurement or prediction entry; (None, None, None) for other entries."""
+    b = e.get("body") or {}
+    if e.get("type") == "measurement":
+        return b.get("protocol"), b.get("item"), b.get("group")
+    if e.get("type") == "prediction":
+        return b.get("protocol"), b.get("event"), b.get("group")
+    return None, None, None
 
 
 def _is_number(v) -> bool:
@@ -223,9 +263,92 @@ class Ledger:
         digest = hashlib.sha256("\n".join(sorted(cleaned)).encode("utf-8")).hexdigest()
         return {"sha256": digest, "count": len(cleaned)}
 
+    @staticmethod
+    def groups_of(groups: dict) -> dict:
+        """Hash of an item -> group map (sorted "item<TAB>group" lines) and the number of distinct groups."""
+        if not isinstance(groups, dict) or not groups:
+            raise LedgerError("a group map needs at least one item")
+        lines = []
+        for i, g in groups.items():
+            lines.append(f"{clean_text(i, 'manifest item id')}\t{clean_text(g, 'group')}")
+        digest = hashlib.sha256("\n".join(sorted(lines)).encode("utf-8")).hexdigest()
+        return {"sha256": digest, "count": len(set(groups.values()))}
+
+    def used_in_family(self, family: set[str], es: list[dict] | None = None) -> tuple[dict[str, str], dict[str, str]]:
+        """Items and groups already recorded under the protocols in ``family``: ({item: protocol}, {group: protocol})."""
+        items: dict[str, str] = {}
+        groups: dict[str, str] = {}
+        for e in (self.entries() if es is None else es):
+            p, item, group = _record_keys(e)
+            if p in family:
+                items.setdefault(item, p)
+                if group is not None:
+                    groups.setdefault(group, p)
+        return items, groups
+
+    def _check_stages(self, protocol: dict, protos: dict[str, dict]) -> None:
+        """Rules for "stage", "after", "systems" and "group_by" (all optional)."""
+        stage = protocol.get("stage")
+        if stage is not None and stage not in STAGES:
+            raise LedgerError(f"stage must be one of {STAGES}")
+        if "after" in protocol:
+            a = protocol["after"]
+            if not (isinstance(a, str) or (isinstance(a, list) and a and all(isinstance(x, str) for x in a))):
+                raise LedgerError("after must be a protocol hash or a non-empty list of protocol hashes")
+            if stage is None:
+                raise LedgerError('"after" needs a "stage" (explore, validate or confirm)')
+            hs = after_of(protocol)
+            if len(set(hs)) != len(hs):
+                raise LedgerError("after lists the same protocol twice")
+            for ph in hs:
+                if ph not in protos:
+                    raise LedgerError(f"after: unknown protocol hash {ph[:12]}...")
+                prev = protos[ph]["body"]["protocol"]
+                if prev.get("stage") is None:
+                    raise LedgerError(f"after: protocol {ph[:12]}... has no stage")
+                if STAGE_RANK[prev["stage"]] > STAGE_RANK[stage]:
+                    raise LedgerError(f"a {stage} stage cannot come after a {prev['stage']} stage")
+            for ph in stage_family(protos, hs):
+                if protos[ph]["body"]["protocol"].get("group_by") != protocol.get("group_by"):
+                    raise LedgerError(f"group_by {protocol.get('group_by')!r} differs from a linked stage ({ph[:12]}...); "
+                                      "groups can only be kept apart if every stage of the chain records the same kind of group")
+        if "group_by" in protocol:
+            clean_text(protocol["group_by"], "group_by")
+        if "systems" in protocol:
+            ss = protocol["systems"]
+            if not isinstance(ss, list) or not ss:
+                raise LedgerError("systems must be a non-empty list of names (the candidates sealed for this stage)")
+            cleaned = [clean_text(s, "system") for s in ss]
+            if len(set(cleaned)) != len(cleaned):
+                raise LedgerError("systems lists the same name twice")
+
+    def _check_record(self, proto: dict, protocol_hash: str, item: str, system: str, group: str | None,
+                      used: tuple[dict, dict] | None) -> None:
+        """Per-record rules for staged protocols: sealed candidates, groups present, nothing reused from another stage."""
+        if "systems" in proto and system not in proto["systems"]:
+            raise LedgerError(f"{system!r} is not one of the candidates sealed for this protocol {proto['systems']}")
+        if proto.get("group_by") is not None and group is None:
+            raise LedgerError(f"this protocol keeps {proto['group_by']!r} groups apart; every record needs a group")
+        if used is None:
+            return
+        items, groups = used
+        if item in items:
+            raise LedgerError(f"item {item!r} was already used in another stage (protocol {items[item][:12]}...); "
+                              "an item may be used by one stage only")
+        if group is not None and proto.get("group_by") is not None and group in groups:
+            raise LedgerError(f"{proto['group_by']} {group!r} was already used in another stage (protocol {groups[group][:12]}...); "
+                              "a group may be used by one stage only")
+
+    def _used_elsewhere(self, protos: dict[str, dict], protocol_hash: str, es: list[dict]) -> tuple[dict, dict] | None:
+        proto = protos[protocol_hash]["body"]["protocol"]
+        if proto.get("stage") is None:
+            return None
+        family = stage_family(protos, [protocol_hash]) - {protocol_hash}
+        return self.used_in_family(family, es) if family else None
+
     @_atomic
     def register(self, protocol: dict, source_bytes: bytes | None = None, now: str | None = None,
-                 manifest_ids: list[str] | None = None) -> dict:
+                 manifest_ids: list[str] | None = None, manifest_groups: dict | None = None) -> dict:
         if not isinstance(protocol, dict):
             raise LedgerError("protocol must be a JSON object")
         missing = [k for k in PROTOCOL_REQUIRED if k not in protocol]
@@ -271,13 +394,35 @@ class Ledger:
             raise LedgerError("n_comparisons must be a positive integer")
         if len(canonical(protocol)) > MAX_META_BYTES:
             raise LedgerError("protocol is too large")
+        protos = self.protocols()
+        self._check_stages(protocol, protos)
         body = {"protocol": protocol}
         if source_bytes is not None:
             body["source_sha256"] = hashlib.sha256(source_bytes).hexdigest()
+        if manifest_groups is not None and manifest_ids is None:
+            manifest_ids = list(manifest_groups)
         if manifest_ids is not None:
             body["manifest"] = self.manifest_of(manifest_ids)
             if protocol["n_target"] > body["manifest"]["count"]:
                 raise LedgerError(f"n_target ({protocol['n_target']}) is larger than the manifest ({body['manifest']['count']} items)")
+            if manifest_groups is not None:
+                if set(manifest_groups) != set(manifest_ids):
+                    raise LedgerError("the group map must cover exactly the manifest items")
+                body["manifest"]["groups"] = self.groups_of(manifest_groups)
+            elif protocol.get("group_by") is not None:
+                raise LedgerError(f"this protocol keeps {protocol['group_by']!r} groups apart; give the manifest with a group per item")
+            hs = after_of(protocol)
+            if hs:
+                items, groups = self.used_in_family(stage_family(protos, hs))
+                clash = sorted(i for i in manifest_ids if i in items)
+                if clash:
+                    raise LedgerError(f"{len(clash)} manifest item(s) were already used in a linked stage, e.g. {clash[:5]}; "
+                                      "remove them (`fseal overlap` lists them) and seal again")
+                if manifest_groups is not None and protocol.get("group_by") is not None:
+                    gclash = sorted({g for g in manifest_groups.values() if g in groups})
+                    if gclash:
+                        raise LedgerError(f"{len(gclash)} {protocol['group_by']} group(s) were already used in a linked stage, e.g. {gclash[:5]}; "
+                                          "remove their items (`fseal overlap` lists them) and seal again")
         return self._append("protocol", body, now)
 
     def protocols(self) -> dict[str, dict]:
@@ -285,10 +430,12 @@ class Ledger:
 
     @_atomic
     def predict(self, pid: str, protocol_hash: str, forecaster: str, probs: dict, event: str | None = None,
-                meta: dict | None = None, now: str | None = None) -> dict:
+                meta: dict | None = None, now: str | None = None, group: str | None = None) -> dict:
         pid = clean_text(pid, "prediction id")
         forecaster = clean_text(forecaster, "forecaster")
         event = clean_text(event if event is not None else pid, "event")
+        if group is not None:
+            group = clean_text(group, "group")
         protos = self.protocols()
         if protocol_hash not in protos:
             raise LedgerError("unknown protocol hash; register the protocol before predicting")
@@ -308,7 +455,11 @@ class Ledger:
             raise LedgerError(f"prediction id {pid!r} already exists (the ledger is append-only)")
         if any(e["type"] == "outcome" and e["body"]["event"] == event for e in es):
             raise LedgerError(f"event {event!r} is already resolved; no new predictions for it")
+        self._check_record(protos[protocol_hash]["body"]["protocol"], protocol_hash, event, forecaster, group,
+                           self._used_elsewhere(protos, protocol_hash, es))
         body = {"id": pid, "event": event, "protocol": protocol_hash, "forecaster": forecaster, "probs": probs}
+        if group is not None:
+            body["group"] = group
         if meta is not None:
             if not isinstance(meta, dict) or len(canonical(meta)) > MAX_META_BYTES:
                 raise LedgerError("meta must be a small JSON object")
@@ -327,10 +478,12 @@ class Ledger:
 
     @_atomic
     def measure(self, item: str, system: str, value: float, protocol_hash: str, metric: str | None = None,
-                meta: dict | None = None, now: str | None = None) -> dict:
+                meta: dict | None = None, now: str | None = None, group: str | None = None) -> dict:
         """Record one score of one system on one item (for protocols of kind 'measure')."""
         item = clean_text(item, "item")
         system = clean_text(system, "system")
+        if group is not None:
+            group = clean_text(group, "group")
         protos = self.protocols()
         if protocol_hash not in protos:
             raise LedgerError("unknown protocol hash; register the protocol before measuring")
@@ -341,13 +494,17 @@ class Ledger:
         metric = self._metric_name(proto, metric)
         if not _is_number(value):
             raise LedgerError("value must be a finite number")
+        es = self.entries()
         if any(e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash and e["body"]["item"] == item
-               and e["body"]["system"] == system and e["body"].get("metric", metric) == metric for e in self.entries()):
+               and e["body"]["system"] == system and e["body"].get("metric", metric) == metric for e in es):
             raise LedgerError(f"{system!r} already has a value for item {item!r} on {metric!r} (append-only; give a re-run a new system name)")
+        self._check_record(proto, protocol_hash, item, system, group, self._used_elsewhere(protos, protocol_hash, es))
         multi = len(protocol_metrics(proto)) > 1
         body = {"id": f"{system}::{item}" + (f"::{metric}" if multi else ""), "item": item, "system": system, "protocol": protocol_hash, "value": value}
         if multi:
             body["metric"] = metric
+        if group is not None:
+            body["group"] = group
         if meta is not None:
             if not isinstance(meta, dict) or len(canonical(meta)) > MAX_META_BYTES:
                 raise LedgerError("meta must be a small JSON object")
@@ -358,7 +515,7 @@ class Ledger:
     def measure_many(self, protocol_hash: str, rows: list[dict], skip_existing: bool = False, now: str | None = None) -> dict:
         """Record many measurements in one step: all rows are checked first and nothing is written if any is invalid.
 
-        Each row: {"item", "system", "value", optional "metric", optional "meta"}. Returns {"added", "skipped"}.
+        Each row: {"item", "system", "value", optional "metric", optional "meta", optional "group"}. Returns {"added", "skipped"}.
         """
         with self._lock():
             es = self.entries()
@@ -373,15 +530,18 @@ class Ledger:
             multi = len(protocol_metrics(proto)) > 1
             seen = {(e["body"]["item"], e["body"]["system"], e["body"].get("metric")) for e in es
                     if e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash}
+            used = self._used_elsewhere(protos, protocol_hash, es)
             items, errors, skipped = [], [], 0
             for n, r in enumerate(rows, 1):
                 try:
                     if not isinstance(r, dict):
                         raise LedgerError("row is not an object")
                     item, system = clean_text(r.get("item"), "item"), clean_text(r.get("system"), "system")
+                    group = clean_text(r["group"], "group") if r.get("group") is not None else None
                     metric = self._metric_name(proto, r.get("metric"))
                     if not _is_number(r.get("value")):
                         raise LedgerError("value must be a finite number")
+                    self._check_record(proto, protocol_hash, item, system, group, used)
                     key = (item, system, metric if multi else None)
                     if key in seen:
                         if skip_existing:
@@ -393,6 +553,8 @@ class Ledger:
                             "protocol": protocol_hash, "value": r["value"]}
                     if multi:
                         body["metric"] = metric
+                    if group is not None:
+                        body["group"] = group
                     meta = r.get("meta")
                     if meta is not None:
                         if not isinstance(meta, dict) or len(canonical(meta)) > MAX_META_BYTES:
@@ -413,7 +575,8 @@ class Ledger:
         proto = self.protocols()[protocol_hash]["body"]["protocol"]
         metric = self._metric_name(proto, metric)
         multi = len(protocol_metrics(proto)) > 1
-        return [{"id": e["body"]["id"], "event": e["body"]["item"], "forecaster": e["body"]["system"], "value": e["body"]["value"]}
+        return [{"id": e["body"]["id"], "event": e["body"]["item"], "forecaster": e["body"]["system"], "value": e["body"]["value"],
+                 "group": e["body"].get("group"), "meta": e["body"].get("meta") or {}}
                 for e in self.entries() if e["type"] == "measurement" and e["body"]["protocol"] == protocol_hash
                 and (e["body"].get("metric") == metric if multi else True)]
 
@@ -494,28 +657,56 @@ class Ledger:
         for e in es:
             b = e["body"]
             if e["type"] == "prediction" and b["protocol"] == protocol_hash and b["event"] in outs:
-                rows.append({"id": b["id"], "event": b["event"], "forecaster": b["forecaster"], "probs": b["probs"], "outcome": outs[b["event"]]})
+                rows.append({"id": b["id"], "event": b["event"], "forecaster": b["forecaster"], "probs": b["probs"], "outcome": outs[b["event"]],
+                             "group": b.get("group"), "meta": b.get("meta") or {}})
         return rows
 
-    def check_manifest(self, ids: list[str]) -> list[str]:
+    def check_manifest(self, ids: list[str], groups: dict | None = None) -> list[str]:
         """Check a manifest file's ids against the sealed manifest(s) and against what was recorded.
 
         Problems: the set does not match any sealed manifest, or an item was recorded that is not in the set.
+        With ``groups`` (item -> group): the map must match the sealed one, and every recorded group must agree with it.
         (Items in the set that are not recorded yet are normal and not reported as problems.)
         """
         m = self.manifest_of(ids)
         want = set(ids)
-        matches = [h for h, e in self.protocols().items() if (e["body"].get("manifest") or {}).get("sha256") == m["sha256"]]
+        protos = self.protocols()
+        matches = [h for h, e in protos.items() if (e["body"].get("manifest") or {}).get("sha256") == m["sha256"]]
         if not matches:
             return ["no protocol was sealed with this manifest (the item set differs from the sealed one)"]
         problems = []
+        if groups is not None:
+            g = self.groups_of(groups)["sha256"]
+            sealed = [h for h in matches if (protos[h]["body"]["manifest"].get("groups") or {}).get("sha256") == g]
+            if not sealed:
+                problems.append("the item -> group map differs from the sealed one (or none was sealed)")
         for e in self.entries():
             b = e["body"]
-            if e["type"] == "measurement" and b["protocol"] in matches and b["item"] not in want:
-                problems.append(f"entry {e['seq']}: item {b['item']!r} was recorded but is not in the sealed manifest")
-            if e["type"] == "prediction" and b["protocol"] in matches and b["event"] not in want:
-                problems.append(f"entry {e['seq']}: event {b['event']!r} was predicted but is not in the sealed manifest")
+            p, item, group = _record_keys(e)
+            if p not in matches:
+                continue
+            if item not in want:
+                what = "item" if e["type"] == "measurement" else "event"
+                problems.append(f"entry {e['seq']}: {what} {item!r} was recorded but is not in the sealed manifest")
+            elif groups is not None and group is not None and groups.get(item) != group:
+                problems.append(f"entry {e['seq']}: {item!r} was recorded in group {group!r}, but the manifest puts it in {groups.get(item)!r}")
         return problems
+
+    def overlap(self, ids: list[str], protocol_hashes: list[str], groups: dict | None = None) -> dict:
+        """Which of ``ids`` (or their groups) were already used in the chain of stages linked to ``protocol_hashes``.
+
+        Use it to build the item list of the next stage before sealing it. Returns
+        {"items": [...], "groups": [...], "remaining": [...]}; ``remaining`` keeps the order of ``ids``.
+        """
+        protos = self.protocols()
+        for h in protocol_hashes:
+            if h not in protos:
+                raise LedgerError(f"unknown protocol hash {h[:12]}...")
+        used_items, used_groups = self.used_in_family(stage_family(protos, list(protocol_hashes)))
+        bad_items = [i for i in ids if i in used_items]
+        bad_groups = sorted({groups[i] for i in ids if groups and groups.get(i) in used_groups})
+        remaining = [i for i in ids if i not in used_items and not (groups and groups.get(i) in used_groups)]
+        return {"items": bad_items, "groups": bad_groups, "remaining": remaining}
 
     # ---------- verification ----------
     def verify(self, expected_head: str | None = None) -> list[str]:
@@ -536,7 +727,8 @@ class Ledger:
         protocol_metric_names: dict[str, list[str]] = {}
         closed: set[str] = set()
         measured: set[tuple] = set()
-        for i, e in enumerate(self.entries(), 1):
+        es = self.entries()
+        for i, e in enumerate(es, 1):
             try:
                 if e.get("seq") != i:
                     problems.append(f"entry {i}: seq is {e.get('seq')}, expected {i}")
@@ -613,8 +805,50 @@ class Ledger:
                     problems.append(f"entry {i}: unknown type {t!r}")
             except Exception as ex:  # malformed entry shapes must not crash verification
                 problems.append(f"entry {i}: malformed ({type(ex).__name__})")
+        try:
+            problems += self._verify_stages(es)
+        except Exception as ex:  # pragma: no cover - shapes are checked above; never crash verification
+            problems.append(f"stage checks could not run ({type(ex).__name__})")
         if expected_head and expected_head != GENESIS and expected_head not in hashes:
             problems.append("the expected head hash is not in the chain (entries removed or rewritten)")
+        return problems
+
+    @staticmethod
+    def _verify_stages(es: list[dict]) -> list[str]:
+        """Re-check the stage rules over the whole history (they are enforced on write; this catches hand-made entries)."""
+        problems: list[str] = []
+        protos: dict[str, dict] = {}
+        used: dict[str, tuple[set, set]] = {}
+        for i, e in enumerate(es, 1):
+            t, b = e.get("type"), e.get("body") or {}
+            if t == "protocol" and isinstance(b.get("protocol"), dict):
+                for a in after_of(b["protocol"]):
+                    if a not in protos:
+                        problems.append(f"entry {i}: after refers to a protocol that is not earlier in the ledger")
+                protos[e.get("hash")] = e
+                continue
+            ph, item, group = _record_keys(e)
+            if ph is None or ph not in protos:
+                continue
+            p = protos[ph]["body"]["protocol"]
+            who = b.get("system") if t == "measurement" else b.get("forecaster")
+            if "systems" in p and who not in p["systems"]:
+                problems.append(f"entry {i}: {who!r} is not one of the candidates sealed for its protocol")
+            if p.get("group_by") is not None and group is None:
+                problems.append(f"entry {i}: no group, but its protocol keeps {p['group_by']!r} groups apart")
+            if p.get("stage") is not None:
+                for other in stage_family(protos, [ph]) - {ph}:
+                    oi, og = used.get(other, (set(), set()))
+                    if item in oi:
+                        problems.append(f"entry {i}: item {item!r} was already used in another stage")
+                        break
+                    if group is not None and p.get("group_by") is not None and group in og:
+                        problems.append(f"entry {i}: group {group!r} was already used in another stage")
+                        break
+            ui, ug = used.setdefault(ph, (set(), set()))
+            ui.add(item)
+            if group is not None:
+                ug.add(group)
         return problems
 
     def status(self) -> dict:

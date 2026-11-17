@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, report, stats, workflow
-from .ledger import Ledger, LedgerError, loads
+from .ledger import Ledger, LedgerError, after_of, loads
 
 
 def _ledger(args) -> Ledger:
@@ -35,18 +35,41 @@ def cmd_init(args):
     print(f"initialised {args.dir}/ledger.jsonl")
 
 
-def _read_ids(path: str) -> list[str]:
-    """One item id per line, or a JSON array of strings."""
+def _read_manifest(path: str) -> tuple[list[str], dict | None]:
+    """Item ids, and optionally a group per item.
+
+    Accepted: one id per line; "id<TAB>group" per line; a JSON array of ids; a JSON object {"id": "group"}.
+    """
     text = Path(path).read_text(encoding="utf-8")
-    if text.lstrip().startswith("["):
+    head = text.lstrip()[:1]
+    if head in ("[", "{"):
         try:
-            ids = loads(text)
+            data = loads(text)
         except ValueError as e:
             raise LedgerError(f"manifest is not valid JSON: {e}") from e
-        if not all(isinstance(i, str) for i in ids):
+        if isinstance(data, dict):
+            if not all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+                raise LedgerError('a JSON manifest object must map item ids to group names: {"item": "group"}')
+            return list(data), dict(data)
+        if not all(isinstance(i, str) for i in data):
             raise LedgerError("a JSON manifest must be an array of strings")
-        return ids
-    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+        return data, None
+    lines = [ln.strip("\r\n") for ln in text.splitlines() if ln.strip()]
+    if any("\t" in ln for ln in lines):
+        groups: dict[str, str] = {}
+        for n, ln in enumerate(lines, 1):
+            parts = ln.split("\t")
+            if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+                raise LedgerError(f"manifest line {n}: expected 'item<TAB>group'")
+            if parts[0].strip() in groups:
+                raise LedgerError(f"manifest line {n}: item {parts[0].strip()!r} listed twice")
+            groups[parts[0].strip()] = parts[1].strip()
+        return list(groups), groups
+    return [ln.strip() for ln in lines], None
+
+
+def _read_ids(path: str) -> list[str]:
+    return _read_manifest(path)[0]
 
 
 def cmd_register(args):
@@ -55,11 +78,44 @@ def cmd_register(args):
         data = loads(raw.decode("utf-8"))
     except ValueError as e:
         raise LedgerError(f"protocol file is not valid JSON: {e}") from e
-    ids = _read_ids(args.manifest) if args.manifest else None
-    e = _ledger(args).register(data, source_bytes=raw, manifest_ids=ids)
-    print(f"sealed protocol {e['body']['protocol']['name']!r}\nprotocol hash: {e['hash']}")
+    ids, groups = _read_manifest(args.manifest) if args.manifest else (None, None)
+    e = _ledger(args).register(data, source_bytes=raw, manifest_ids=ids, manifest_groups=groups)
+    p = e["body"]["protocol"]
+    print(f"sealed protocol {p['name']!r}\nprotocol hash: {e['hash']}")
+    if p.get("stage"):
+        after = ", ".join(h[:12] + "..." for h in after_of(p)) or "nothing (first stage)"
+        print(f"stage: {p['stage']}, after {after}")
+    if p.get("systems"):
+        print(f"sealed candidates: {', '.join(p['systems'])}")
     if ids is not None:
         print(f"sealed item set: {e['body']['manifest']['count']} items, sha256 {e['body']['manifest']['sha256']}")
+        if groups is not None:
+            print(f"sealed groups: {e['body']['manifest']['groups']['count']} distinct, sha256 {e['body']['manifest']['groups']['sha256']}")
+
+
+def cmd_overlap(args):
+    """Which items (or groups) of a candidate list were already used in a linked stage."""
+    led = _ledger(args)
+    ids, groups = _read_manifest(args.manifest)
+    res = led.overlap(ids, args.after, groups=groups)
+    print(f"{len(ids)} candidate items; already used in a linked stage: {len(res['items'])} item(s)"
+          + (f", {len(res['groups'])} group(s)" if groups is not None else ""))
+    for i in res["items"][:20]:
+        print("  item ", i)
+    for g in res["groups"][:20]:
+        print("  group", g)
+    if len(res["items"]) > 20 or len(res["groups"]) > 20:
+        print("  ...")
+    print(f"usable for the next stage: {len(res['remaining'])} item(s)")
+    if args.write_remaining:
+        out = Path(args.write_remaining)
+        if groups is not None:
+            out.write_text("".join(f"{i}\t{groups[i]}\n" for i in res["remaining"]), encoding="utf-8")
+        else:
+            out.write_text("".join(f"{i}\n" for i in res["remaining"]), encoding="utf-8")
+        print(f"wrote {out}")
+    if res["items"] or res["groups"]:
+        sys.exit(1)
 
 
 def cmd_predict(args):
@@ -69,13 +125,14 @@ def cmd_predict(args):
         for line in Path(args.file).read_text(encoding="utf-8").splitlines():
             if line.strip():
                 r = loads(line)
-                led.predict(r["id"], r["protocol"], r.get("forecaster", "anon"), r["probs"], event=r.get("event"), meta=r.get("meta"))
+                led.predict(r["id"], r["protocol"], r.get("forecaster", "anon"), r["probs"], event=r.get("event"), meta=r.get("meta"),
+                            group=r.get("group"))
                 n += 1
         print(f"appended {n} predictions")
     else:
         if not (args.id and args.probs):
             raise LedgerError("give --id and --probs, or --file")
-        led.predict(args.id, _protocol_hash(led, args), args.forecaster, loads(args.probs), event=args.event)
+        led.predict(args.id, _protocol_hash(led, args), args.forecaster, loads(args.probs), event=args.event, group=args.group)
         print(f"appended prediction {args.id}")
 
 
@@ -95,7 +152,7 @@ def cmd_measure(args):
     else:
         if not (args.item and args.system and args.value is not None):
             raise LedgerError("give --item, --system and --value, or --file")
-        led.measure(args.item, args.system, args.value, _protocol_hash(led, args), metric=args.metric)
+        led.measure(args.item, args.system, args.value, _protocol_hash(led, args), metric=args.metric, group=args.group)
         print(f"recorded {args.system} on {args.item}: {args.value}")
 
 
@@ -113,17 +170,20 @@ def cmd_import_csv(args):
         if missing:
             raise LedgerError(f"CSV is missing column(s) {missing}; found {cols}")
         if args.wide:
-            metric_cols = [c for c in cols if c not in (args.item_col, args.system_col)]
+            metric_cols = [c for c in cols if c not in (args.item_col, args.system_col, args.group_col)]
             unknown = [c for c in metric_cols if c not in names]
             if unknown:
                 raise LedgerError(f"column(s) {unknown} are not metrics of this protocol {names}")
+        if args.group_col and args.group_col not in cols:
+            raise LedgerError(f"CSV has no column {args.group_col!r}; found {cols}")
         for n, rec in enumerate(rd, 2):
+            grp = {"group": rec[args.group_col]} if args.group_col and (rec.get(args.group_col) or "").strip() else {}
             if args.wide:
                 for c in metric_cols:
                     if (rec.get(c) or "").strip():
-                        rows.append({"item": rec[args.item_col], "system": rec[args.system_col], "metric": c, "value": _num(rec[c], n, c)})
+                        rows.append({"item": rec[args.item_col], "system": rec[args.system_col], "metric": c, "value": _num(rec[c], n, c), **grp})
             else:
-                r = {"item": rec[args.item_col], "system": rec[args.system_col], "value": _num(rec[args.value_col], n, args.value_col)}
+                r = {"item": rec[args.item_col], "system": rec[args.system_col], "value": _num(rec[args.value_col], n, args.value_col), **grp}
                 if args.metric_col in cols and (rec.get(args.metric_col) or "").strip():
                     r["metric"] = rec[args.metric_col]
                 rows.append(r)
@@ -158,7 +218,8 @@ def cmd_verify(args):
     led = _ledger(args)
     problems = led.verify(expected_head=args.expected_head)
     if args.manifest:
-        problems += led.check_manifest(_read_ids(args.manifest))
+        ids, groups = _read_manifest(args.manifest)
+        problems += led.check_manifest(ids, groups=groups)
     if problems:
         print("LEDGER BROKEN")
         for p in problems:
@@ -181,12 +242,19 @@ def cmd_score(args):
     h = _protocol_hash(led, args)
     ms = [workflow.pick_metric(led, h, args.metric)] if args.metric else workflow.metrics_of(led, h)
     for m in ms:
-        res = stats.score(led.items_for(h, m["name"]), m["name"])
         tag = "" if len(ms) == 1 else (" [primary]" if m["primary"] else " [exploratory]")
         print(f"metric: {m['name']}{tag} ({workflow.direction_text(m['direction'])})")
         hib = m["direction"] == "higher_is_better"
-        for name, r in sorted(res.items(), key=lambda kv: -kv[1]["mean"] if hib else kv[1]["mean"]):
-            print(f"  {name:24s} n={r['n']:<5d} mean={r['mean']:.4f}")
+        rows = led.items_for(h, m["name"])
+        groups = workflow.strata(rows, args.by) if args.by else {None: rows}
+        for label, part in groups.items():
+            if label is not None:
+                print(f"  {args.by} = {label}")
+            res = stats.score(part, m["name"])
+            for name, r in sorted(res.items(), key=lambda kv: -kv[1]["mean"] if hib else kv[1]["mean"]):
+                print(f"  {'  ' if label is not None else ''}{name:24s} n={r['n']:<5d} mean={r['mean']:.4f}")
+        if args.by:
+            print(f"  (split by {args.by}: descriptive only; small groups vary a lot by chance)")
 
 
 def cmd_calibration(args):
@@ -231,6 +299,21 @@ def cmd_test(args):
     led = _ledger(args)
     h = _protocol_hash(led, args)
     names = [args.metric] if args.metric else [m["name"] for m in workflow.metrics_of(led, h)]
+    if args.by:
+        for k, name in enumerate(names):
+            if k:
+                print()
+            res = workflow.compare_by(led, h, args.a, args.b, args.by, seed=args.seed, metric=name)
+            print(f"{args.a} vs {args.b} split by {args.by} ({name}; difference = {args.a} minus {args.b})")
+            print(f"  EXPLORATORY: {len(res)} subgroups, no multiplicity adjustment, no verdicts. Each look is recorded.")
+            print("  The confirmatory answer is the pooled `fseal test A B` sealed in the protocol.")
+            for r in res:
+                if r["n"] < 2:
+                    print(f"  {r['stratum']:20s} fewer than 2 paired items, skipped")
+                    continue
+                lo, hi = r["ci"]
+                print(f"  {r['stratum']:20s} n={r['n']:<5d} mean difference {r['mean_diff']:+.4f}   95% interval [{lo:+.4f}, {hi:+.4f}]")
+        return
     for k, name in enumerate(names):
         if k:
             print()
@@ -241,7 +324,7 @@ def cmd_report(args):
     led = _ledger(args)
     h = _protocol_hash(led, args)
     pairs = [tuple(c) for c in (args.compare or [])]
-    page = report.build(led, h, compare=pairs, interim=args.interim, seed=args.seed)
+    page = report.build(led, h, compare=pairs, interim=args.interim, seed=args.seed, by=args.by)
     out = Path(args.output)
     out.write_text(page, encoding="utf-8")
     print(f"wrote {out} ({len(page) // 1024} KB, self-contained: no scripts, no external requests)")
@@ -366,18 +449,26 @@ def main(argv=None):
 
     add("init", cmd_init, "create an empty ledger")
     s = add("register", cmd_register, "seal an analysis protocol (JSON file)"); s.add_argument("protocol_file")
-    s.add_argument("--manifest", help="file with the item ids to be evaluated (one per line, or a JSON array); its hash is sealed too")
+    s.add_argument("--manifest", help="file with the item ids to be evaluated (one per line, 'item<TAB>group' per line, a JSON array, "
+                                      'or a JSON object {"item": "group"}); its hash is sealed too')
+    s = add("overlap", cmd_overlap, "which candidate items (or groups) were already used in a linked stage; exits 1 if any")
+    s.add_argument("manifest", help="candidate item list, same formats as register --manifest")
+    s.add_argument("--after", action="append", required=True, metavar="HASH", help="protocol hash of an earlier stage (repeatable)")
+    s.add_argument("--write-remaining", metavar="FILE", help="write the usable items (same format) to FILE")
     s = add("predict", cmd_predict, "append a prediction (or --file JSONL)")
     s.add_argument("--file"); s.add_argument("--id"); s.add_argument("--event"); s.add_argument("--protocol")
     s.add_argument("--forecaster", default="anon"); s.add_argument("--probs", help='JSON, e.g. \'{"yes":0.7,"no":0.3}\'')
+    s.add_argument("--group", help="group of the event (case, period, speaker...): kept apart between stages when the protocol sets group_by")
     s = add("measure", cmd_measure, "record a score of a system on an item (measure protocols)")
-    s.add_argument("--file", help='JSONL lines like {"item": "doc-1", "system": "v2", "value": 0.83}')
+    s.add_argument("--file", help='JSONL lines like {"item": "doc-1", "system": "v2", "value": 0.83, "group": "case-7"}')
     s.add_argument("--item"); s.add_argument("--system"); s.add_argument("--value", type=float); s.add_argument("--protocol")
+    s.add_argument("--group", help="group of the item (case, period, speaker...): kept apart between stages when the protocol sets group_by")
     s.add_argument("--metric", help="required when the protocol defines several metrics (a JSONL line may carry its own \"metric\")")
     s.add_argument("--skip-existing", action="store_true", help="with --file: ignore values that are already recorded (safe to re-run)")
     s = add("import-csv", cmd_import_csv, "import measured values from a CSV file")
     s.add_argument("csv_file"); s.add_argument("--protocol"); s.add_argument("--wide", action="store_true", help="columns after item/system are metrics (blank cells skipped)")
     s.add_argument("--item-col", default="item"); s.add_argument("--system-col", default="system"); s.add_argument("--value-col", default="value"); s.add_argument("--metric-col", default="metric")
+    s.add_argument("--group-col", help="column holding the group of each item (optional)")
     s.add_argument("--skip-existing", action="store_true", help="ignore values that are already recorded (safe to re-run)")
     s = add("close", cmd_close, "record that the study ended, and why (stopped early is a result too)")
     s.add_argument("--reason", required=True, help="why it ended, in a sentence"); s.add_argument("--protocol")
@@ -388,12 +479,15 @@ def main(argv=None):
     add("status", cmd_status, "counts and head hash")
     add("head", cmd_head, "print the head hash (publish or timestamp it)")
     s = add("score", cmd_score, "mean loss (or value) per forecaster or system"); s.add_argument("--protocol"); s.add_argument("--metric")
+    s.add_argument("--by", metavar="KEY", help='split by "group" or by a key of the recorded meta (descriptive)')
     s = add("calibration", cmd_calibration, "reliability table and ECE"); s.add_argument("--protocol"); s.add_argument("--forecaster")
     s = add("test", cmd_test, "paired comparison of two forecasters with an interval")
     s.add_argument("a"); s.add_argument("b"); s.add_argument("--protocol"); s.add_argument("--interim", action="store_true"); s.add_argument("--seed", type=int, default=43)
     s.add_argument("--metric", help="one metric (default: every metric of the protocol)")
+    s.add_argument("--by", metavar="KEY", help='compare inside each subgroup of "group" or of a meta key (exploratory, logged)')
     s = add("report", cmd_report, "write a self-contained HTML report")
     s.add_argument("-o", "--output", default="report.html"); s.add_argument("--protocol"); s.add_argument("--seed", type=int, default=43)
+    s.add_argument("--by", metavar="KEY", help='add a table split by "group" or by a meta key (descriptive)')
     s.add_argument("--compare", nargs=2, action="append", metavar=("A", "B"), help="add a paired comparison (repeatable); logged like `test`")
     s.add_argument("--interim", action="store_true")
     s = add("agreement", cmd_agreement, "agreement (Cohen's kappa, AC1) between two raters on the same items")

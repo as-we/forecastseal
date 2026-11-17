@@ -6,7 +6,7 @@ import html
 import math
 
 from . import __version__, stats, workflow
-from .ledger import Ledger
+from .ledger import Ledger, after_of
 
 CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:"
 CSS = """
@@ -198,7 +198,7 @@ def _metric_block(led: Ledger, h: str, proto: dict, m: dict, multi: bool, compar
 
 
 def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str, str]] | None = None,
-          interim: bool = False, seed: int = 43, now: str | None = None) -> str:
+          interim: bool = False, seed: int = 43, now: str | None = None, by: str | None = None) -> str:
     problems = led.verify()
     protos = led.protocols()
     if protocol_hash is None:
@@ -213,6 +213,20 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
     gen = now or dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     man = protos[protocol_hash]["body"].get("manifest")
     manifest_row = (f'<tr><th>Sealed item set</th><td>{esc(man["count"])} items · <span class="mono">{esc(man["sha256"])}</span></td></tr>' if man else "")
+    if man and man.get("groups"):
+        manifest_row += f'<tr><th>Sealed groups</th><td>{esc(man["groups"]["count"])} distinct · <span class="mono">{esc(man["groups"]["sha256"])}</span></td></tr>'
+    if proto.get("stage"):
+        prev = []
+        for ph in after_of(proto):
+            pp = protos.get(ph, {}).get("body", {}).get("protocol", {})
+            prev.append(f'{esc(pp.get("name", "?"))} ({esc(pp.get("stage", "?"))}, <span class="mono">{esc(ph[:12])}…</span>)')
+        manifest_row += (f'<tr><th>Stage</th><td>{esc(proto["stage"])}' + (f' · after {", ".join(prev)}' if prev else " · first stage") +
+                         '<br><small class="muted">Within a chain of stages, each item' + (" and each group" if proto.get("group_by") else "") +
+                         ' is used by one stage only; the ledger refuses reuse.</small></td></tr>')
+    if proto.get("group_by"):
+        manifest_row += f'<tr><th>Groups kept apart</th><td>{esc(proto["group_by"])}</td></tr>'
+    if proto.get("systems"):
+        manifest_row += f'<tr><th>Sealed candidates</th><td>{", ".join(esc(s) for s in proto["systems"])}</td></tr>'
 
     blocks, all_comps, systems, items_done = [], [], set(), set()
     for m in metrics:
@@ -268,6 +282,22 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
                      f'<tbody>{rowsh}</tbody></table></div><p class="muted">Only the primary metrics support conclusions; exploratory ones are for ideas to test next.</p></section>')
     for b in blocks:
         parts.extend(b)
+    if by:
+        for m in metrics:
+            groups = workflow.strata(led.items_for(protocol_hash, m["name"]), by)
+            if not groups:
+                continue
+            hib = m["direction"] == "higher_is_better"
+            rowsh = []
+            for label, part in groups.items():
+                res = stats.score(part, m["name"])
+                for k, (name, r) in enumerate(sorted(res.items(), key=lambda kv: -kv[1]["mean"] if hib else kv[1]["mean"])):
+                    rowsh.append(f'<tr><td>{esc(label) if k == 0 else ""}</td><td>{esc(name)}</td><td class="n">{r["n"]}</td><td class="n">{_f(r["mean"])}</td></tr>')
+            parts.append(f'<section><h2>By {esc(by)}{(" · " + esc(m["name"])) if multi else ""} (descriptive)</h2>'
+                         f'<div class="scroll"><table><thead><tr><th>{esc(by)}</th><th>{"System" if is_measure else "Forecaster"}</th><th class="n">{unit.capitalize()}</th>'
+                         f'<th class="n">{"Mean value" if is_measure else "Mean loss"}</th></tr></thead><tbody>{"".join(rowsh)}</tbody></table></div>'
+                         f'<p class="muted">{len(groups)} subgroups. Splitting multiplies the chances of a striking difference by luck alone: read this table for ideas to test next, '
+                         'not for conclusions. The sealed comparison above is the answer.</p></section>')
     if not all_comps:
         parts.append('<section><h2>Paired comparisons</h2><p class="muted">None requested. Add <code>--compare A B</code> when the planned number of items is complete (or <code>--interim</code> for a logged, non-final look).</p></section>')
 

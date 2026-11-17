@@ -2,7 +2,7 @@
 
 Seal your evaluation plan before the results exist, keep forecasts and scores in a tamper-evident ledger, then test the comparison honestly.
 
-> **Status: pre-alpha (v0.0.10), not on PyPI yet.** The command line, the ledger format and the report may still change.
+> **Status: pre-alpha (v0.0.11), not on PyPI yet.** The command line, the ledger format and the report may still change.
 
 ## See it in 30 seconds
 
@@ -54,6 +54,9 @@ Two things may have changed with LLMs. Trying one more analysis became almost fr
 | Past forecasts are edited or dropped when they turn out badly | The chain breaks and `verify` reports it. Anchor the head hash to catch deleted tails too. |
 | Too few items to ever see the difference you care about | `fseal power` says so before you collect the data. |
 | An LLM judge is trusted without checking it against people | `fseal agreement` gives kappa and AC1 with an interval. |
+| Items used for tuning end up in the final test | Stages (`explore`, `validate`, `confirm`) are linked with `after`; an item may be used by one stage only, and the ledger refuses reuse. |
+| A new item from a case (or speaker, period, source) that was already explored slips into the final test | `group_by` keeps whole groups apart between stages, not only single items. |
+| "It works best on cropped images", found by slicing after the fact | `--by` splits results by group or by a recorded field, labelled exploratory, with every look logged. |
 
 ![Two timelines: without a sealed plan the approach is tweaked after every look and no version reaches the planned size; with a sealed plan one approach runs to the planned size, an early look is only a hint, and the verdict comes at the planned size.](docs/images/timeline-wrong-vs-right.svg)
 
@@ -161,6 +164,27 @@ Verdict: not enough data. Even all 300 items would be 53% of what the final test
 ```
 
 If there is not enough data, the honest options are to collect more going forward (prospectively), to accept a larger smallest difference, or to treat every result as a hint and say so.
+
+## Explore, then confirm on data you have not seen (stages and groups)
+
+Tuning on some data and then testing on the same data, or on data that shares a source with it, makes results look better than they are. Seal each stage as its own protocol and link it to the one before:
+
+```json
+{"name": "confirm on unseen sources", "kind": "measure", "metric": "correct", "direction": "higher_is_better",
+ "n_target": 240, "alpha": 0.05,
+ "stage": "confirm", "after": "<hash of the explore protocol>",
+ "group_by": "source", "systems": ["variant-b", "baseline"]}
+```
+
+- `stage` is `explore`, `validate` or `confirm`; `after` names the earlier stage(s). A stage cannot follow a later one.
+- Within one chain of stages, **each item is used by one stage only**. Sealing a manifest that contains an item already used in a linked stage is refused, and so is recording one.
+- `group_by` does the same for whole groups (case, speaker, period, source): every record carries a group, and a group seen in one stage cannot appear in another. Give the manifest as `item<TAB>group` lines or as a JSON object `{"item": "group"}`; the item-to-group map is sealed by hash.
+- `systems` seals the candidates carried forward, so a later stage cannot quietly add more.
+- `fseal overlap candidates.tsv --after <hash> --write-remaining next.tsv` lists what was already used and writes the usable rest, before you seal the next stage.
+
+Splitting results after the fact is still useful for ideas. `fseal score --by condition`, `fseal test A B --by group` and `fseal report --by condition` split by the recorded group or by a key of the recorded `meta`. Those splits are labelled exploratory, are never verdicts, and every split comparison is logged.
+
+`python examples/stages_demo.py` walks through it on synthetic data. One limit: items from the same group are usually correlated, and the intervals here treat items as independent, so they come out too narrow. For a cluster-aware interval use a statistics library (see Related projects).
 
 [`docs/plan-calculator.html`](docs/plan-calculator.html) is the same calculation as a single offline page (English and Japanese, no network, no install). Use it online at [as-we.github.io/forecastseal/plan-calculator.html](https://as-we.github.io/forecastseal/plan-calculator.html), or open the file in a browser.
 

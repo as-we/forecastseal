@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased (0.0.10)
+## Unreleased (0.0.11)
+- Stages: a protocol can declare `stage` (explore / validate / confirm) and `after` (the earlier stage or stages). Within one chain of stages an item may be used by one stage only: sealing a manifest that reuses one, or recording one, is refused, and `verify` re-checks the whole history.
+- Groups: `group_by` keeps whole groups (case, speaker, period, source) apart between stages. Records carry a `group` (`measure --group`, JSONL `"group"`, `import-csv --group-col`, `predict --group`). A manifest can map items to groups (`item<TAB>group` lines or a JSON object); the map is sealed by hash and `verify --manifest` checks recorded groups against it.
+- Sealed candidates: `systems` limits which systems (or forecasters) a protocol accepts.
+- `fseal overlap`: list the candidate items or groups already used in a linked stage, and write the usable rest.
+- `--by KEY` for `score`, `test` and `report`: split by the recorded group or by a key of the recorded `meta`. Split comparisons are exploratory, unadjusted, never verdicts, and logged.
+- The report shows the stage, the linked stages, the groups kept apart and the sealed candidates.
+- `examples/stages_demo.py`.
+
+## 0.0.10
 First tagged state. Everything below is new.
 - Hash-chained, append-only ledger: `init`, `register`, `predict`, `resolve`, `measure`, `verify`, `status`, `head`.
 - Scoring and tests: `score`, `calibration`, `test` (paired bootstrap, looks logged, `--interim`), `power`.

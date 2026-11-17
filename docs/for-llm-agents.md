@@ -22,6 +22,10 @@ When I ask you to compare options (prompts, models, settings) or to check whethe
 6. Finish with `fseal verify` and `fseal report -o report.html --compare NEW OLD`. In your summary, state: how many variants were tried, which metrics were primary, and whether the interval excludes 0. Do not describe exploratory metrics as findings.
 7. Run code for every calculation and paste the output. Do not estimate numbers in your head.
 8. Before splitting data, run `fseal plan --n-total N --delta D --sd S` and tell me if there is not enough data.
+9. If we tune first and test later, seal each part as its own stage ("stage": "explore", then "stage": "confirm" with "after": <explore hash>).
+   If items share a source (case, speaker, period), set "group_by" and give the manifest as item<TAB>group.
+   Build the next stage's list with `fseal overlap candidates.tsv --after <hash> --write-remaining next.tsv`. Never test on items or groups you tuned on.
+10. Results split by subgroup (`--by`) are exploratory. Report them as ideas to test next, not as findings.
 ````
 
 ## What each rule is for
@@ -34,6 +38,8 @@ When I ask you to compare options (prompts, models, settings) or to check whethe
 | 6 | Reporting the best of many tries as if it were the only one |
 | 7 | Numbers that were never computed |
 | 8 | Splitting data that is too small to show anything |
+| 9 | Testing on data that was used for tuning, or that shares a source with it |
+| 10 | Slicing results after the fact until one slice looks good |
 
 ## Limits
 

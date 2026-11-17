@@ -38,6 +38,41 @@ def family_size(proto: dict, metric: dict) -> int:
     return n_primary * proto.get("n_comparisons", 1)
 
 
+NONE_LABEL = "(none)"
+
+
+def strata(rows: list[dict], key: str) -> dict[str, list[dict]]:
+    """Split rows by ``key``: "group" (the recorded group) or a key of the recorded meta. Missing values go to "(none)"."""
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        v = r.get("group") if key == "group" else (r.get("meta") or {}).get(key)
+        label = NONE_LABEL if v is None else str(v)
+        out.setdefault(label, []).append(r)
+    return dict(sorted(out.items()))
+
+
+def compare_by(led: Ledger, protocol_hash: str, a: str, b: str, key: str, seed: int = 43, metric: str | None = None) -> list[dict]:
+    """Paired comparison inside each stratum. Always exploratory: unadjusted, never a verdict, and each look is logged.
+
+    The confirmatory answer stays the pooled comparison sealed in the protocol (``compare_logged``).
+    """
+    proto = protocol_of(led, protocol_hash)
+    m = pick_metric(led, protocol_hash, metric)
+    multi = len(protocol_metrics(proto)) > 1
+    hib = m["direction"] == "higher_is_better"
+    out = []
+    for label, rows in strata(led.items_for(protocol_hash, m["name"]), key).items():
+        try:
+            res = stats.compare(rows, m["name"], a, b, proto["alpha"], 1, seed=seed, higher_is_better=hib)
+        except ValueError:                                   # a or b has nothing in this stratum
+            res = {"n": 0}
+        res.update({"stratum": label, "key": key, "a": a, "b": b, "metric": m["name"]})
+        if res["n"] >= 2:
+            led.log_analysis(protocol_hash, "exploratory", f"test {a} vs {b} where {key} = {label}", res["n"], metric=m["name"] if multi else None)
+        out.append(res)
+    return out
+
+
 def compare_logged(led: Ledger, protocol_hash: str, a: str, b: str, interim: bool = False, seed: int = 43, metric: str | None = None) -> dict:
     """Paired comparison of one metric under the sealed protocol.
 

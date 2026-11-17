@@ -1,8 +1,19 @@
 # forecastseal
 
-Seal your evaluation plan before the results exist, keep forecasts and scores in a tamper-evident ledger, then test the comparison honestly.
+Seal your evaluation plan before you see any results, record forecasts and scores in a tamper-evident ledger, and compare systems under the rules you sealed.
 
 > **Status: pre-alpha (v0.0.11), not on PyPI yet.** The command line, the ledger format and the report may still change.
+
+**The problem it addresses.** When you evaluate prompts, models or forecasts, it is easy to fool yourself without meaning to: you pick the metric after seeing the numbers, stop as soon as the numbers look good, test on data you tuned on, or report the best of many tries as if it were the only one. The result looks like a finding, but it may be luck.
+
+**What it does.** `forecastseal` writes your plan down before the first result, records every result and every look at the results after that, and refuses steps that would break the plan. Anyone with the ledger, including you later, can then check that the comparison followed the plan.
+
+**How you use it**, in four steps:
+
+1. Create a ledger with `fseal init`. Write the plan (called a *protocol*) as a small JSON file with the metrics, the number of items and the significance level, and seal it: `fseal register protocol.json`.
+2. Record results as they come in: `fseal measure` or `fseal import-csv` for scores, `fseal predict` and `fseal resolve` for probability forecasts.
+3. Compare and report: `fseal test A B`, `fseal report -o report.html`.
+4. Check that nothing was changed afterwards: `fseal verify`.
 
 ## See it in 30 seconds
 
@@ -17,7 +28,7 @@ python examples/noise_demo.py
   best of 20, but paying for the 20 tries:  6.0% of studies
 ```
 
-Nothing real is going on in that data. Reporting the best of many tries can still look like a discovery. `forecastseal` is a small tool for making that kind of process visible. For a second demo, `examples/peeking_demo.py` shows what looking early and stopping when it looks good does to false alarms and to estimates.
+Nothing real is going on in that data, yet reporting the best of 20 tries looks like a discovery in two studies out of three. `forecastseal` records how many things were tried, so that a result like this can be recognised. A second demo, `examples/peeking_demo.py`, shows how checking results early, and stopping as soon as they look good, raises false alarms and exaggerates the estimates.
 
 ## The idea
 
@@ -25,10 +36,10 @@ Many mistakes in forecasting and in evaluating models or prompts may come less f
 
 `forecastseal` makes the process explicit and checkable:
 
-1. **Seal the plan first.** Metrics (which ones count as conclusions, which are exploratory), planned sample size, significance level, optional non-inferiority margin and the list of items to evaluate are written to the ledger before any result.
-2. **Append, never edit.** Every entry contains the hash of the previous one. Changing, deleting or reordering history breaks the chain and `fseal verify` says so.
-3. **Look at the data in a way that leaves a trace.** Comparisons use paired items and bootstrap intervals. Looking before the planned sample size needs `--interim`, is recorded, and never produces a verdict. Every look is in the ledger.
-4. **Report what happened.** One self-contained HTML file with the sealed plan, scores, calibration, comparisons and the log of looks.
+1. **Seal the plan first.** The metrics (which ones count as conclusions and which are exploratory), the planned sample size, the significance level, an optional non-inferiority margin and the list of items to evaluate are written to the ledger before any result is recorded.
+2. **Append, never edit.** Every entry contains the hash of the previous one. Changing, deleting or reordering an entry breaks the chain, and `fseal verify` reports it.
+3. **Look at the data in a way that leaves a trace.** Comparisons pair the two systems item by item and use bootstrap intervals. A look before the planned sample size needs `--interim`, is recorded, and never produces a verdict. Every look is in the ledger.
+4. **Report what happened.** `fseal report` writes one self-contained HTML file with the sealed plan, the scores, calibration, the comparisons and the log of looks.
 
 It is small (standard library only), runs locally and makes no network calls.
 
@@ -46,7 +57,7 @@ Two things may have changed with LLMs. Trying one more analysis became almost fr
 
 | Without it, this can happen | With it |
 |---|---|
-| "v2 looks better", after twenty variants were tried and the best one kept | The plan says what will be compared. Every look is logged, exploratory metrics are labelled and unadjusted, and the report warns when more final comparisons were run than planned. |
+| "v2 looks better", after twenty variants were tried and the best one was kept | The plan says what will be compared. Every look is logged, exploratory metrics are labelled and unadjusted, and the report warns when more final comparisons were run than planned. |
 | The metric, threshold or margin is chosen after seeing the numbers | They are sealed before the first result. Changing any of them changes the hash. |
 | The test set is quietly swapped or grown until it works | The item list is sealed by hash; `fseal verify --manifest` finds anything recorded outside it. |
 | "Not significantly different, so the cheaper model is as good" | A non-inferiority margin is sealed in advance and the output says whether it is cleared. |
@@ -56,11 +67,11 @@ Two things may have changed with LLMs. Trying one more analysis became almost fr
 | An LLM judge is trusted without checking it against people | `fseal agreement` gives kappa and AC1 with an interval. |
 | Items used for tuning end up in the final test | Stages (`explore`, `validate`, `confirm`) are linked with `after`; an item may be used by one stage only, and the ledger refuses reuse. |
 | A new item from a case (or speaker, period, source) that was already explored slips into the final test | `group_by` keeps whole groups apart between stages, not only single items. |
-| "It works best on cropped images", found by slicing after the fact | `--by` splits results by group or by a recorded field, labelled exploratory, with every look logged. |
+| "It works best on cropped images", found by slicing the results after the fact | `--by` splits results by group or by a recorded field. The splits are labelled exploratory, and every look is logged. |
 
 ![Two timelines: without a sealed plan the approach is tweaked after every look and no version reaches the planned size; with a sealed plan one approach runs to the planned size, an early look is only a hint, and the verdict comes at the planned size.](docs/images/timeline-wrong-vs-right.svg)
 
-Why the order matters: every look-and-tweak before the planned size leaves a version of the approach that has too few items to support a verdict. In a ledger, looks before the planned size are marked **×** and count as hints; a verdict (**●**) can only come at the planned size.
+Why the order matters: each time you look and then change the approach before the planned size, the changed version starts again with too few items to support a verdict. In the report's timeline, looks before the planned size are marked **×** and count as hints; a verdict (**●**) can only come at the planned size.
 
 It cannot make a bad evaluation good. It makes the process hard to bend unnoticed, including by yourself.
 
@@ -129,7 +140,7 @@ fseal report -o report.html --compare v2 v1
 - **Non-inferiority.** "Not significantly different" is not "as good". Seal a `"margin"` (in the metric's units, chosen before looking) and `fseal test cheap big` also says whether the interval clears it.
 - **Judge vs people.** Record integer labels from each rater as measurements, then `fseal agreement human llm-judge --weights quadratic` prints observed agreement, Cohen's kappa with an interval, Gwet's AC1 and the confusion table. Decide the acceptable level before looking.
 - **Importing.** `fseal import-csv` (long or `--wide`) and `fseal measure --file x.jsonl` are all-or-nothing: if one row is invalid, nothing is written and the message names the rows. `--skip-existing` makes re-runs safe.
-- A re-run of a system on an item is a new system name (`v2-run2`); measurements are append-only. The scores come from whatever scorer you trust. `forecastseal` does not judge them; it keeps the comparison honest. `examples/prompt_versions_demo.py` shows the flow with synthetic scores.
+- Measurements are append-only, so record a re-run of a system under a new system name (`v2-run2`). The scores come from whatever scorer you trust. `forecastseal` does not judge the scores; it makes sure they are compared under the sealed rules. `examples/prompt_versions_demo.py` shows the flow with synthetic scores.
 
 ## If a study stops early
 
@@ -165,9 +176,20 @@ Verdict: not enough data. Even all 300 items would be 53% of what the final test
 
 If there is not enough data, the honest options are to collect more going forward (prospectively), to accept a larger smallest difference, or to treat every result as a hint and say so.
 
+[`docs/plan-calculator.html`](docs/plan-calculator.html) is the same calculation as a single offline page (English and Japanese, no network, no install). Use it online at [as-we.github.io/forecastseal/plan-calculator.html](https://as-we.github.io/forecastseal/plan-calculator.html), or open the file in a browser.
+
 ## Explore, then confirm on data you have not seen (stages and groups)
 
-Tuning on some data and then testing on the same data, or on data that shares a source with it, makes results look better than they are. Seal each stage as its own protocol and link it to the one before:
+If you tune a system on some data and then test it on the same data, or on data from the same sources, the result looks better than it is. To prevent that, seal each stage as its own protocol and link it to the stage before it:
+
+```bash
+fseal register explore.json --manifest explore_items.tsv      # "stage": "explore"
+# ... record results, compare the variants, pick the best one ...
+fseal overlap candidates.tsv --after <explore hash> --write-remaining confirm_items.tsv
+fseal register confirm.json --manifest confirm_items.tsv      # "stage": "confirm", "after": "<explore hash>"
+```
+
+A confirm protocol looks like this:
 
 ```json
 {"name": "confirm on unseen sources", "kind": "measure", "metric": "correct", "direction": "higher_is_better",
@@ -176,17 +198,15 @@ Tuning on some data and then testing on the same data, or on data that shares a 
  "group_by": "source", "systems": ["variant-b", "baseline"]}
 ```
 
-- `stage` is `explore`, `validate` or `confirm`; `after` names the earlier stage(s). A stage cannot follow a later one.
-- Within one chain of stages, **each item is used by one stage only**. Sealing a manifest that contains an item already used in a linked stage is refused, and so is recording one.
-- `group_by` does the same for whole groups (case, speaker, period, source): every record carries a group, and a group seen in one stage cannot appear in another. Give the manifest as `item<TAB>group` lines or as a JSON object `{"item": "group"}`; the item-to-group map is sealed by hash.
-- `systems` seals the candidates carried forward, so a later stage cannot quietly add more.
-- `fseal overlap candidates.tsv --after <hash> --write-remaining next.tsv` lists what was already used and writes the usable rest, before you seal the next stage.
+- `stage` is `explore`, `validate` or `confirm`, and `after` names the earlier stage or stages. A stage cannot come after a later one (no explore after a confirm).
+- Within one chain of stages, **each item can be used by one stage only**. The ledger refuses to seal a manifest that contains an item a linked stage already used, and refuses to record a result for such an item.
+- `group_by` applies the same rule to whole groups (case, speaker, period, source). Every record then needs a group, and a group used in one stage cannot appear in another. Give the manifest as `item<TAB>group` lines or as a JSON object `{"item": "group"}`; the map from items to groups is sealed by hash.
+- `systems` lists the candidates this stage may test. Results for any other system are refused, so no candidate can be added after sealing.
+- `fseal overlap` lists the items and groups that a linked stage already used, and writes the remaining items to a file you can seal as the next manifest.
 
-Splitting results after the fact is still useful for ideas. `fseal score --by condition`, `fseal test A B --by group` and `fseal report --by condition` split by the recorded group or by a key of the recorded `meta`. Those splits are labelled exploratory, are never verdicts, and every split comparison is logged.
+Splitting results after the fact is still useful for ideas. `fseal score --by condition`, `fseal test A B --by group` and `fseal report --by condition` split the results by the recorded group or by a key of the recorded `meta`. These splits are labelled exploratory and never give a verdict, and every split comparison is logged.
 
-`python examples/stages_demo.py` walks through it on synthetic data. One limit: items from the same group are usually correlated, and the intervals here treat items as independent, so they come out too narrow. For a cluster-aware interval use a statistics library (see Related projects).
-
-[`docs/plan-calculator.html`](docs/plan-calculator.html) is the same calculation as a single offline page (English and Japanese, no network, no install). Use it online at [as-we.github.io/forecastseal/plan-calculator.html](https://as-we.github.io/forecastseal/plan-calculator.html), or open the file in a browser.
+`python examples/stages_demo.py` walks through the whole flow on synthetic data. One limit: items from the same group are usually correlated, but the intervals here treat items as independent, so they come out too narrow. For an interval that accounts for groups, use a statistics library (see Related projects).
 
 ## Reading the statistics honestly
 

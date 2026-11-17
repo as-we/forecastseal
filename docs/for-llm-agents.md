@@ -1,6 +1,6 @@
 # Using forecastseal from an AI coding agent
 
-Paste the block below into your agent's instructions (for example `AGENTS.md` or `CLAUDE.md`), or into the first message of a session. It asks the agent to leave a trace of how many things it tried, which is the part of an AI-assisted analysis that tends to go missing from the final write-up.
+Paste the block below into your agent's instructions (for example `AGENTS.md` or `CLAUDE.md`), or into the first message of a session. It asks the agent to leave a record of how many things it tried. That number is what most often goes missing from the write-up of an AI-assisted analysis.
 
 It does not make the agent's analysis correct. It makes the process easier to check.
 

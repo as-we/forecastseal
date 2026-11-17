@@ -296,8 +296,8 @@ def build(led: Ledger, protocol_hash: str | None = None, compare: list[tuple[str
             parts.append(f'<section><h2>By {esc(by)}{(" · " + esc(m["name"])) if multi else ""} (descriptive)</h2>'
                          f'<div class="scroll"><table><thead><tr><th>{esc(by)}</th><th>{"System" if is_measure else "Forecaster"}</th><th class="n">{unit.capitalize()}</th>'
                          f'<th class="n">{"Mean value" if is_measure else "Mean loss"}</th></tr></thead><tbody>{"".join(rowsh)}</tbody></table></div>'
-                         f'<p class="muted">{len(groups)} subgroups. Splitting multiplies the chances of a striking difference by luck alone: read this table for ideas to test next, '
-                         'not for conclusions. The sealed comparison above is the answer.</p></section>')
+                         f'<p class="muted">{len(groups)} subgroups. The more subgroups there are, the more likely one of them shows a striking difference by luck alone. '
+                         'Read this table for ideas to test next, not for conclusions. The answer is the sealed comparison above.</p></section>')
     if not all_comps:
         parts.append('<section><h2>Paired comparisons</h2><p class="muted">None requested. Add <code>--compare A B</code> when the planned number of items is complete (or <code>--interim</code> for a logged, non-final look).</p></section>')
 
